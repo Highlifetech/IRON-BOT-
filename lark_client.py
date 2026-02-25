@@ -1,7 +1,7 @@
 """
 Lark API Client for Project Due Date Tracker Bot
-Handles authentication, reading Lark Base records,
-and sending group chat notifications.
+Handles authentication, auto-discovering all tables in a Lark Base,
+reading records, and sending group chat notifications.
 """
 import json
 import logging
@@ -32,8 +32,8 @@ class LarkClient:
     """Client for Lark Suite API (Base + Messaging)."""
 
     def __init__(self):
-        self.base_url    = LARK_BASE_URL.rstrip("/")
-        self.token       = None
+        self.base_url      = LARK_BASE_URL.rstrip("/")
+        self.token         = None
         self.token_expires = 0
 
     # -------------------------------------------------------------------------
@@ -64,12 +64,30 @@ class LarkClient:
         }
 
     # -------------------------------------------------------------------------
-    # Lark Base — read records
+    # Auto-discover all tables in the Base
+    # -------------------------------------------------------------------------
+
+    def get_all_table_ids(self) -> list:
+        """Fetch all table IDs from the Base automatically — no manual config needed."""
+        url  = (f"{self.base_url}/open-apis/bitable/v1/apps/"
+                f"{LARK_BASE_APP_TOKEN}/tables")
+        resp = requests.get(url, headers=self._headers(), timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise Exception(f"Failed to list tables: {data}")
+        tables = data.get("data", {}).get("items", [])
+        table_ids = [t["table_id"] for t in tables]
+        logger.info(f"Auto-discovered {len(table_ids)} tables in Base: {table_ids}")
+        return table_ids
+
+    # -------------------------------------------------------------------------
+    # Read records from a table
     # -------------------------------------------------------------------------
 
     def get_table_records(self, table_id: str) -> list:
         """Fetch all records from a Lark Base table, handling pagination."""
-        records  = []
+        records    = []
         page_token = None
 
         while True:
@@ -79,7 +97,8 @@ class LarkClient:
             if page_token:
                 params["page_token"] = page_token
 
-            resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            resp = requests.get(url, headers=self._headers(),
+                                params=params, timeout=30)
             resp.raise_for_status()
             data = resp.json()
 
@@ -104,7 +123,6 @@ class LarkClient:
         def get_text(field_name: str) -> str:
             val = fields.get(field_name, "")
             if isinstance(val, list):
-                # Rich text / multi-value — join text parts
                 return " ".join(
                     part.get("text", "") if isinstance(part, dict) else str(part)
                     for part in val
@@ -112,11 +130,9 @@ class LarkClient:
             return str(val).strip() if val else ""
 
         def get_date_ms(field_name: str):
-            """Return timestamp in ms, or None."""
             val = fields.get(field_name)
             if val is None:
                 return None
-            # Lark Base stores dates as millisecond timestamps
             if isinstance(val, (int, float)):
                 return int(val)
             return None
