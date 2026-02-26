@@ -1,8 +1,9 @@
-"""
-Lark API Client for Project Due Date Tracker Bot
+""" Lark API Client for Project Due Date Tracker Bot
+
 Handles authentication, auto-discovering all tables in a Lark Base,
 reading records, and sending group chat notifications.
 """
+
 import json
 import logging
 import time
@@ -13,7 +14,6 @@ from config import (
     LARK_APP_ID,
     LARK_APP_SECRET,
     LARK_BASE_URL,
-    LARK_CHAT_ID,
     LARK_BASE_APP_TOKEN,
     FIELD_ORDER_NUM,
     FIELD_ORDER_DATE,
@@ -32,8 +32,8 @@ class LarkClient:
     """Client for Lark Suite API (Base + Messaging)."""
 
     def __init__(self):
-        self.base_url      = LARK_BASE_URL.rstrip("/")
-        self.token         = None
+        self.base_url = LARK_BASE_URL.rstrip("/")
+        self.token = None
         self.token_expires = 0
 
     # -------------------------------------------------------------------------
@@ -43,16 +43,16 @@ class LarkClient:
     def _get_tenant_token(self) -> str:
         if self.token and time.time() < self.token_expires:
             return self.token
-        url  = f"{self.base_url}/open-apis/auth/v3/tenant_access_token/internal"
+        url = f"{self.base_url}/open-apis/auth/v3/tenant_access_token/internal"
         resp = requests.post(url, json={
-            "app_id":     LARK_APP_ID,
+            "app_id": LARK_APP_ID,
             "app_secret": LARK_APP_SECRET,
         }, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"Lark auth failed: {data}")
-        self.token         = data["tenant_access_token"]
+        self.token = data["tenant_access_token"]
         self.token_expires = time.time() + data.get("expire", 7200) - 300
         logger.info("Lark tenant token acquired")
         return self.token
@@ -60,59 +60,61 @@ class LarkClient:
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self._get_tenant_token()}",
-            "Content-Type":  "application/json",
+            "Content-Type": "application/json",
         }
 
     # -------------------------------------------------------------------------
     # Auto-discover all tables in the Base
     # -------------------------------------------------------------------------
 
-    def get_all_table_ids(self) -> list:
-        """Fetch all table IDs from the Base automatically — no manual config needed."""
-        url  = (f"{self.base_url}/open-apis/bitable/v1/apps/"
-                f"{LARK_BASE_APP_TOKEN}/tables")
+    def get_all_tables(self, app_token: str = None) -> list:
+        """Fetch all tables (id + name) from the Base automatically."""
+        token = app_token or LARK_BASE_APP_TOKEN
+        url = f"{self.base_url}/open-apis/bitable/v1/apps/{token}/tables"
         resp = requests.get(url, headers=self._headers(), timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"Failed to list tables: {data}")
         tables = data.get("data", {}).get("items", [])
-        table_ids = [t["table_id"] for t in tables]
-        logger.info(f"Auto-discovered {len(table_ids)} tables in Base: {table_ids}")
-        return table_ids
+        result = [{"table_id": t["table_id"], "name": t.get("name", "")} for t in tables]
+        logger.info(f"Auto-discovered {len(result)} tables in Base")
+        return result
+
+    def get_all_table_ids(self, app_token: str = None) -> list:
+        """Fetch all table IDs (for backward compatibility with bot_server.py)."""
+        return [t["table_id"] for t in self.get_all_tables(app_token)]
 
     # -------------------------------------------------------------------------
     # Read records from a table
     # -------------------------------------------------------------------------
 
-    def get_table_records(self, table_id: str) -> list:
+    def get_all_records(self, app_token: str, table_id: str) -> list:
         """Fetch all records from a Lark Base table, handling pagination."""
-        records    = []
-        page_token = None
+        return self.get_table_records(table_id, app_token)
 
+    def get_table_records(self, table_id: str, app_token: str = None) -> list:
+        """Fetch all records from a Lark Base table, handling pagination."""
+        token = app_token or LARK_BASE_APP_TOKEN
+        records = []
+        page_token = None
         while True:
-            url    = (f"{self.base_url}/open-apis/bitable/v1/apps/"
-                      f"{LARK_BASE_APP_TOKEN}/tables/{table_id}/records")
+            url = (f"{self.base_url}/open-apis/bitable/v1/apps/"
+                   f"{token}/tables/{table_id}/records")
             params = {"page_size": 100}
             if page_token:
                 params["page_token"] = page_token
-
-            resp = requests.get(url, headers=self._headers(),
-                                params=params, timeout=30)
+            resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-
             if data.get("code") != 0:
                 raise Exception(f"Failed to read table {table_id}: {data}")
-
             items = data.get("data", {}).get("items", [])
             records.extend(items)
-
-            has_more   = data.get("data", {}).get("has_more", False)
+            has_more = data.get("data", {}).get("has_more", False)
             page_token = data.get("data", {}).get("page_token")
             if not has_more:
                 break
-
         logger.info(f"  Fetched {len(records)} records from table {table_id}")
         return records
 
@@ -163,31 +165,33 @@ class LarkClient:
     # Messaging
     # -------------------------------------------------------------------------
 
-    def send_group_message(self, message: str):
-        """Send an interactive card message to the Lark group chat."""
-        if not LARK_CHAT_ID:
-            logger.warning("No LARK_CHAT_ID configured, skipping message")
+    def send_group_message(self, message: str, chat_id: str = None):
+        """Send an interactive card message to a Lark group chat.
+        
+        chat_id: if provided, send to this chat. Otherwise logs a warning.
+        """
+        if not chat_id:
+            logger.warning("No chat_id provided, skipping message")
             return
-        url    = f"{self.base_url}/open-apis/im/v1/messages"
+        url = f"{self.base_url}/open-apis/im/v1/messages"
         params = {"receive_id_type": "chat_id"}
-        body   = {
-            "receive_id": LARK_CHAT_ID,
-            "msg_type":   "interactive",
-            "content":    self._build_card(message),
+        body = {
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": self._build_card(message),
         }
-        resp = requests.post(url, headers=self._headers(),
-                             params=params, json=body, timeout=30)
+        resp = requests.post(url, headers=self._headers(), params=params, json=body, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"Failed to send message: {data}")
-        logger.info("Message sent to group chat")
+        logger.info(f"Message sent to chat {chat_id}")
 
     def _build_card(self, text_content: str) -> str:
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title":    {"tag": "plain_text", "content": "📋 HLT Project Due Date Reminder"},
+                "title": {"tag": "plain_text", "content": "📋 HLT Project Due Date Reminder"},
                 "template": "orange",
             },
             "elements": [{"tag": "markdown", "content": text_content}],
