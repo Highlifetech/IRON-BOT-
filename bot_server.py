@@ -1,265 +1,171 @@
-"""
-Lark Project Tracker — Interactive Bot Server
-
-This Flask server:
-1. Receives messages from Lark chat via webhook
-2. Fetches live project data from Lark Base
-3. Sends data + question to Gemini AI
-4. Returns the answer back to Lark chat
-"""
 import os
 import logging
 import json
 from datetime import datetime, timezone
-
 from flask import Flask, request, jsonify
 import google.generativeai as genai
-
 from lark_client import LarkClient
 
-logging.basicConfig(
-      level=logging.INFO,
-      format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-
 app = Flask(__name__)
 
-# -------------------------------------------------------------------------
-# Gemini setup
-# -------------------------------------------------------------------------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if not GEMINI_API_KEY:
-      logger.error("GEMINI_API_KEY is not set!")
-else:
-      logger.info(f"GEMINI_API_KEY loaded (length={len(GEMINI_API_KEY)})")
+          logger.error("GEMINI_API_KEY not set")
+      genai.configure(api_key=GEMINI_API_KEY)
 
-genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = None
+gemini_model_name = None
+for _name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]:
+          try:
+                        gemini_model = genai.GenerativeModel(_name)
+                        gemini_model_name = _name
+                        logger.info("Gemini model loaded: " + _name)
+                        break
+except Exception as _e:
+        logger.warning("Model " + _name + " failed: " + str(_e))
 
-# Try multiple model names in case one is unavailable
-def _init_gemini():
-      for model_name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"]:
-                try:
-                              m = genai.GenerativeModel(model_name)
-                              # Quick test to verify the model works
-                              logger.info(f"Gemini model initialized: {model_name}")
-                              return m, model_name
-except Exception as e:
-            logger.warning(f"Model {model_name} failed: {e}")
-    return None, None
-
-gemini_model, gemini_model_name = _init_gemini()
-
-LARK_VERIFICATION_TOKEN = os.environ.get("LARK_VERIFICATION_TOKEN", "")
-
-# Track processed message IDs to prevent duplicate replies
 processed_message_ids = set()
-
 lark = LarkClient()
 
 
-# -------------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------------
-
-def fetch_all_projects() -> list:
-      """Pull ALL records from every table in the Base (including all fields raw)."""
-      projects = []
-      try:
-                tables = lark.get_all_tables()
-                logger.info(f"Found {len(tables)} tables: {[t['name'] for t in tables]}")
+def fetch_all_projects():
+          projects = []
+          try:
+                        tables = lark.get_all_tables()
+                        logger.info("Found " + str(len(tables)) + " tables")
 except Exception as e:
-        logger.error(f"Failed to get tables: {e}")
+        logger.error("Failed to get tables: " + str(e))
         return projects
-
     for table in tables:
-              table_id = table["table_id"]
-              table_name = table.get("name", "Unknown")
-              try:
-                            records = lark.get_table_records(table_id)
-                            logger.info(f"Table '{table_name}': {len(records)} records")
-                            for raw in records:
-                                              # Store raw fields AND table name so Gemini has full context
-                                              fields = raw.get("fields", {})
-                                              fields["__table_name__"] = table_name
-                                              projects.append(fields)
-              except Exception as e:
-                            logger.error(f"Failed to read table '{table_name}' ({table_id}): {e}")
-
-          logger.info(f"Total records fetched: {len(projects)}")
+                  tid = table["table_id"]
+                  tname = table.get("name", "Unknown")
+                  try:
+                                    records = lark.get_table_records(tid)
+                                    for raw in records:
+                                                          fields = dict(raw.get("fields", {}))
+                                                          fields["__table_name__"] = tname
+                                                          projects.append(fields)
+                                                      logger.info("Table " + tname + ": " + str(len(records)) + " records")
+except Exception as e:
+            logger.error("Failed table " + tname + ": " + str(e))
+    logger.info("Total records: " + str(len(projects)))
     return projects
 
 
-def field_to_text(val) -> str:
-      """Convert any Lark field value to a readable string."""
-      if val is None:
-                return "N/A"
-            if isinstance(val, list):
-                      parts = []
-                      for item in val:
-                                    if isinstance(item, dict):
-                                                      parts.append(item.get("text", str(item)))
-            else:
+def field_to_text(val):
+          if val is None:
+                        return "N/A"
+                    if isinstance(val, list):
+                                  parts = []
+                                  for item in val:
+                                                    if isinstance(item, dict):
+                                                                          parts.append(item.get("text", str(item)))
+                    else:
                 parts.append(str(item))
-                      return " ".join(parts).strip() or "N/A"
+                                  return " ".join(parts).strip() or "N/A"
     if isinstance(val, dict):
-              return val.get("text", str(val)).strip() or "N/A"
-    if isinstance(val, (int, float)):
-              # Could be a timestamp in ms
-              if val > 1_000_000_000_000:
+                  return val.get("text", str(val)).strip() or "N/A"
+              if isinstance(val, (int, float)) and val > 1000000000000:
                             try:
                                               dt = datetime.fromtimestamp(val / 1000, tz=timezone.utc)
                                               return dt.strftime("%b %d, %Y")
 except Exception:
-                pass
-        return str(val)
+            pass
     return str(val).strip() or "N/A"
 
 
-def build_context(projects: list) -> str:
-      """Format ALL project data as readable text for Gemini."""
-    today = datetime.now(timezone.utc)
-    today_str = today.strftime("%A, %B %d %Y")
-    lines = [f"Today is {today_str}.", f"Total records: {len(projects)}", ""]
-
+def build_context(projects):
+          today = datetime.now(timezone.utc)
+    lines = ["Today is " + today.strftime("%A %B %d %Y") + ".", "Total records: " + str(len(projects)), ""]
     for p in projects:
-              table_name = p.get("__table_name__", "Unknown Board")
-        line_parts = [f"[Board: {table_name}]"]
-        for key, val in p.items():
-                      if key == "__table_name__":
-                                        continue
-                                    text_val = field_to_text(val)
-            line_parts.append(f"{key}: {text_val}")
-        lines.append(" | ".join(line_parts))
-
+                  tname = p.get("__table_name__", "Unknown")
+                  parts = ["[Board: " + tname + "]"]
+                  for key, val in p.items():
+                                    if key == "__table_name__":
+                                                          continue
+                                                      parts.append(key + ": " + field_to_text(val))
+                                lines.append(" | ".join(parts))
     return "\n".join(lines)
 
 
-def ask_gemini(user_question: str, projects: list) -> str:
-      """Send live project data + user question to Gemini and return the answer."""
-    if not gemini_model:
-              return "Sorry, the AI model is not available right now. Please check the GEMINI_API_KEY."
-
-    context = build_context(projects)
-    logger.info(f"Context size: {len(context)} chars, {len(projects)} records")
-
-    prompt = f"""You are a helpful project tracking assistant for HLT (Highlife Tech).
-
-    You have access to live project board data below. Each record shows all fields from the Lark Base boards.
-    Board names tell you who owns them: boards with "Lucy" in the name belong to Lucy, "Hannah" belongs to Hannah, others belong to Brendan.
-
-    Answer the user's question accurately based only on this data. Be friendly and concise.
-    Use bullet points for lists. Highlight overdue items clearly.
-    If you don't have enough data to answer, say so honestly.
-
-    --- LIVE PROJECT DATA ---
-    {context}
-    --- END DATA ---
-
-    User question: {user_question}
-
-    Answer:"""
-
+def ask_gemini(question, projects):
+          if not gemini_model:
+                        return "AI model not available. Check GEMINI_API_KEY."
+                    context = build_context(projects)
+    prompt = ("You are a helpful assistant for HLT (Highlife Tech).\n"
+                            "Lucy boards belong to Lucy, Hannah boards to Hannah, others to Brendan.\n"
+                            "Answer concisely. Use bullet points. Highlight overdue items.\n\n"
+                            "--- PROJECT DATA ---\n" + context + "\n--- END ---\n\n"
+                            "Question: " + question + "\nAnswer:")
     try:
-              logger.info(f"Sending to Gemini model: {gemini_model_name}")
-        response = gemini_model.generate_content(prompt)
-        answer = response.text.strip()
-        logger.info(f"Gemini answered ({len(answer)} chars)")
+                  resp = gemini_model.generate_content(prompt)
+        answer = resp.text.strip()
+        logger.info("Gemini replied: " + str(len(answer)) + " chars")
         return answer
 except Exception as e:
-        logger.error(f"Gemini error: {type(e).__name__}: {e}")
-        return f"Sorry, I had trouble getting an answer. Error: {type(e).__name__}: {str(e)[:200]}"
+        logger.error("Gemini error: " + str(e))
+        return "AI error: " + str(e)[:300]
 
-
-# -------------------------------------------------------------------------
-# Lark webhook endpoint
-# -------------------------------------------------------------------------
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-      body = request.get_json(silent=True) or {}
-
-    # Step 1: Handle Lark URL verification challenge
+          body = request.get_json(silent=True) or {}
     if body.get("type") == "url_verification":
-              logger.info("Lark URL verification challenge received")
-        return jsonify({"challenge": body.get("challenge", "")})
-
-    # Step 2: Handle incoming messages
-    event = body.get("event", {})
+                  return jsonify({"challenge": body.get("challenge", "")})
+              event = body.get("event", {})
     msg = event.get("message", {})
-    msg_type = msg.get("message_type", "")
-
-    if msg_type != "text":
-              return jsonify({"code": 0})
-
-    message_id = msg.get("message_id", "")
-
-    # Deduplicate
+    if msg.get("message_type") != "text":
+                  return jsonify({"code": 0})
+              message_id = msg.get("message_id", "")
     if message_id in processed_message_ids:
-              return jsonify({"code": 0})
-    processed_message_ids.add(message_id)
+                  return jsonify({"code": 0})
+              processed_message_ids.add(message_id)
     if len(processed_message_ids) > 1000:
-              processed_message_ids.clear()
-
-    # Extract text
-    try:
-              content = json.loads(msg.get("content", "{}"))
-        user_text = content.get("text", "").strip()
-        # Remove @mentions (e.g. "@URGENT PROJECT TRACKER ")
-        if user_text.startswith("@"):
-                      # Strip the @mention prefix
-                      parts = user_text.split(" ", 1)
-            user_text = parts[1].strip() if len(parts) > 1 else ""
-except Exception:
+                  processed_message_ids.clear()
+              try:
+                            content = json.loads(msg.get("content", "{}"))
+                            user_text = content.get("text", "").strip()
+                            if "@" in user_text:
+                                              idx = user_text.find(" ")
+                                              user_text = user_text[idx:].strip() if idx != -1 else ""
+              except Exception:
         return jsonify({"code": 0})
-
     if not user_text:
-              return jsonify({"code": 0})
-
-    chat_id = msg.get("chat_id", "")
+                  return jsonify({"code": 0})
+              chat_id = msg.get("chat_id", "")
     if not chat_id:
-              return jsonify({"code": 0})
-
-    logger.info(f"Question: '{user_text}' from chat {chat_id}")
-
-    # Step 3: Fetch live data and ask Gemini
+                  return jsonify({"code": 0})
+              logger.info("Question: " + repr(user_text) + " chat=" + chat_id)
     projects = fetch_all_projects()
-
     if not projects:
-              logger.warning("No projects fetched — check LARK_BASE_APP_TOKEN and table access")
-        answer = "I couldn't load any project data right now. Please check that the bot has access to the Lark Base."
+                  answer = "Could not load project data. Check bot access to Lark Base."
 else:
         answer = ask_gemini(user_text, projects)
-
-    logger.info(f"Reply: {answer[:150]}...")
-
-    # Step 4: Send reply back
     try:
-              lark.send_group_message(answer, chat_id=chat_id)
+                  lark.send_group_message(answer, chat_id=chat_id)
 except Exception as e:
-        logger.error(f"Failed to send reply: {e}")
-
+        logger.error("Send failed: " + str(e))
     return jsonify({"code": 0})
 
 
 @app.route("/health", methods=["GET"])
 def health():
-      tables = []
+          tables = []
     try:
-              tables = lark.get_all_tables()
+                  tables = lark.get_all_tables()
 except Exception as e:
-        logger.error(f"Health check - table fetch failed: {e}")
+        logger.error("Health error: " + str(e))
     return jsonify({
-              "status": "ok",
-              "service": "HLT Project Tracker Bot",
-              "gemini_model": gemini_model_name,
-              "gemini_ready": gemini_model is not None,
-              "lark_tables": len(tables),
-              "table_names": [t["name"] for t in tables],
+                  "status": "ok",
+                  "gemini_model": gemini_model_name,
+                  "gemini_ready": gemini_model is not None,
+                  "lark_tables": len(tables),
+                  "table_names": [t["name"] for t in tables],
     })
 
 
 if __name__ == "__main__":
-      port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting bot server on port {port}")
+          port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
