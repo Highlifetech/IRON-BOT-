@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import google.generativeai as genai
@@ -11,8 +12,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-if not GEMINI_API_KEY:
-    logger.error("GEMINI_API_KEY not set")
 genai.configure(api_key=GEMINI_API_KEY)
 
 gemini_model = None
@@ -110,106 +109,87 @@ def ask_gemini(question, projects):
 
 
 def extract_question(msg):
-    """Extract question text only if bot is @mentioned. Returns None if not mentioned."""
     try:
         content = json.loads(msg.get("content", "{}"))
         raw_text = content.get("text", "").strip()
     except Exception:
         return None
-
-    # Lark puts @mentions as @_user_1234567 or just @ in group messages
-    # The message must contain an @ mention to be directed at the bot
-    # Check the mentions field in the message
     mentions = msg.get("mentions", [])
-
-    # If there are mentions, check if our bot is one of them
-    # Bot messages have mention_type = "at"
-    bot_mentioned = False
-    if mentions:
-        bot_mentioned = True  # Any @ mention in a group chat = directed at bot
-
-    # Also check if message starts with @ (direct mention pattern)
-    if raw_text.startswith("@"):
-        bot_mentioned = True
-
+    bot_mentioned = bool(mentions) or raw_text.startswith("@")
     if not bot_mentioned:
-        logger.info("Message ignored - bot not mentioned")
         return None
-
-    # Strip the @mention prefix to get the actual question
-    # Lark format: "@Bot Name question text"
     if raw_text.startswith("@"):
-        # Find end of mention (first space after @)
         space_idx = raw_text.find(" ")
         if space_idx == -1:
-            return None  # Just @mention with no question
+            return None
         raw_text = raw_text[space_idx:].strip()
-
     return raw_text if raw_text else None
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.get_json(silent=True) or {}
-
-    # Handle Lark URL verification
     if body.get("type") == "url_verification":
         return jsonify({"challenge": body.get("challenge", "")})
-
     event = body.get("event", {})
     msg = event.get("message", {})
-
-    # Only handle text messages
     if msg.get("message_type") != "text":
         return jsonify({"code": 0})
-
-    # Deduplicate
     message_id = msg.get("message_id", "")
     if message_id in processed_message_ids:
         return jsonify({"code": 0})
     processed_message_ids.add(message_id)
     if len(processed_message_ids) > 1000:
         processed_message_ids.clear()
-
-    # Only respond if bot is @mentioned
     user_text = extract_question(msg)
     if not user_text:
         return jsonify({"code": 0})
-
     chat_id = msg.get("chat_id", "")
     if not chat_id:
         return jsonify({"code": 0})
-
     logger.info("Question: " + repr(user_text) + " chat=" + chat_id)
-
     projects = fetch_all_projects()
     if not projects:
         answer = "Could not load project data. Check bot access to Lark Base."
     else:
         answer = ask_gemini(user_text, projects)
-
     try:
         lark.send_group_message(answer, chat_id=chat_id)
     except Exception as e:
         logger.error("Send failed: " + str(e))
-
     return jsonify({"code": 0})
+
+
+@app.route("/debug", methods=["GET"])
+def debug():
+    result = {}
+    result["env_app_id"] = bool(os.environ.get("LARK_APP_ID"))
+    result["env_app_secret"] = bool(os.environ.get("LARK_APP_SECRET"))
+    result["env_base_token"] = bool(os.environ.get("LARK_BASE_APP_TOKEN"))
+    result["base_token_value"] = os.environ.get("LARK_BASE_APP_TOKEN", "")[:8] + "..."
+    result["lark_base_url"] = os.environ.get("LARK_BASE_URL", "not set")
+    result["gemini_ready"] = gemini_model is not None
+    result["gemini_model"] = gemini_model_name
+
+    try:
+        token = lark._get_tenant_token()
+        result["auth"] = "OK - token length " + str(len(token))
+    except Exception as e:
+        result["auth"] = "FAILED: " + str(e)
+
+    try:
+        tables = lark.get_all_tables()
+        result["tables"] = [t["name"] for t in tables]
+        result["table_count"] = len(tables)
+    except Exception as e:
+        result["tables"] = "FAILED: " + str(e)
+
+    return jsonify(result)
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    tables = []
-    try:
-        tables = lark.get_all_tables()
-    except Exception as e:
-        logger.error("Health error: " + str(e))
-    return jsonify({
-        "status": "ok",
-        "gemini_model": gemini_model_name,
-        "gemini_ready": gemini_model is not None,
-        "lark_tables": len(tables),
-        "table_names": [t["name"] for t in tables],
-    })
+    return jsonify({"status": "ok", "gemini_model": gemini_model_name})
 
 
 if __name__ == "__main__":
