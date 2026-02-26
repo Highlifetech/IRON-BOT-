@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+from config import LARK_CHAT_ID_HANNAH_ARTWORK, LARK_CHAT_ID_LUCY_ARTWORK, FIELD_PRODUCTION_DRAWING, ARTWORK_CONFIRMED_STATUS
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 gemini_model_name = "gemini-2.5-flash"
 logger.info("Gemini client ready, model: " + gemini_model_name)
@@ -237,6 +238,84 @@ def ask_gemini(question, projects, netsuite_data=None):
     return "AI error: " + str(last_error)[:300]
 
 
+
+# -------------------------------------------------------------------------
+# Artwork Approval Detection and Handling
+# -------------------------------------------------------------------------
+
+def detect_artwork_approval(text):
+    """Detect if the message is an artwork approval command. Returns order number or None."""
+    t = text.lower()
+    if ("artwork" in t or "art" in t) and ("approv" in t or "confirm" in t or "approved" in t):
+        # Extract order number like HLT6021, HLT-6021, hlt 6021
+        import re
+        match = re.search(r'hlt[s-]?(d+)', text, re.IGNORECASE)
+        if match:
+            return "HLT" + match.group(1)
+    return None
+
+
+def handle_artwork_approval(order_num, user_text, chat_id):
+    """Find the order, grab the latest artwork from Hannah/Lucy artwork chat, update the record."""
+    logger.info(f"Artwork approval for order: {order_num}")
+
+    # Determine which artwork chat to use based on context or try both
+    artwork_chats = []
+    if LARK_CHAT_ID_HANNAH_ARTWORK:
+        artwork_chats.append(("Hannah", LARK_CHAT_ID_HANNAH_ARTWORK))
+    if LARK_CHAT_ID_LUCY_ARTWORK:
+        artwork_chats.append(("Lucy", LARK_CHAT_ID_LUCY_ARTWORK))
+
+    # Try to find the record first
+    record = lark.find_record_by_order_num(order_num)
+    if not record:
+        return f"❌ Could not find order **{order_num}** in any Lark Base table. Please check the order number."
+
+    table_id = record["table_id"]
+    record_id = record["record_id"]
+    table_name = record["table_name"]
+
+    # Find the most recent artwork file from artwork chats
+    file_info = {}
+    source_name = ""
+    for name, chat in artwork_chats:
+        try:
+            fi = lark.get_recent_file_from_chat(chat)
+            if fi:
+                file_info = fi
+                source_name = name
+                break
+        except Exception as e:
+            logger.error(f"Error fetching from {name} artwork chat: {e}")
+
+    # Update Status to Artwork Confirmed
+    try:
+        lark.update_record_fields(table_id, record_id, {"Status": ARTWORK_CONFIRMED_STATUS})
+        status_msg = f"✅ Status updated to **{ARTWORK_CONFIRMED_STATUS}**"
+    except Exception as e:
+        logger.error(f"Failed to update status: {e}")
+        status_msg = f"⚠️ Status update failed: {str(e)[:100]}"
+
+    # Upload artwork file if found
+    file_msg = ""
+    if file_info and file_info.get("file_key"):
+        try:
+            file_bytes = lark.download_file_from_message(file_info["message_id"], file_info["file_key"])
+            file_name = file_info.get("file_name", "artwork.png")
+            lark.upload_file_to_record(table_id, record_id, FIELD_PRODUCTION_DRAWING, file_bytes, file_name)
+            file_msg = f"\n📎 Artwork from **{source_name}**'s chat uploaded to **Production Drawing** field"
+        except Exception as e:
+            logger.error(f"Failed to upload artwork file: {e}")
+            file_msg = f"\n⚠️ Could not upload artwork file: {str(e)[:100]}"
+    else:
+        file_msg = f"\n⚠️ No artwork file found in artwork chats — status updated but no file attached"
+
+    return (f"🎨 **Order {order_num}** — Artwork Approved!\n"
+            f"📋 Table: {table_name}\n"
+            f"{status_msg}"
+            f"{file_msg}")
+
+
 def extract_question(msg):
     try:
         content = json.loads(msg.get("content", "{}"))
@@ -277,6 +356,17 @@ def webhook():
     if not chat_id:
         return jsonify({"code": 0})
     logger.info("Question: " + repr(user_text) + " chat=" + chat_id)
+
+    # Check for artwork approval command first
+    artwork_order = detect_artwork_approval(user_text)
+    if artwork_order:
+        answer = handle_artwork_approval(artwork_order, user_text, chat_id)
+        try:
+            lark.send_response(answer, chat_id=chat_id)
+        except Exception as e:
+            logger.error("Send failed: " + str(e))
+        return jsonify({"code": 0})
+
 
     netsuite_data = None
     projects_result = {}
