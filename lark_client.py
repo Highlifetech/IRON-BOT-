@@ -199,3 +199,112 @@ class LarkClient:
             "elements": [{"tag": "markdown", "content": text_content}],
         }
         return json.dumps(card)
+
+
+    # -------------------------------------------------------------------------
+    # Artwork Approval Methods
+    # -------------------------------------------------------------------------
+
+    def find_record_by_order_num(self, order_num: str, app_token: str = None) -> dict:
+        """Search all tables for a record matching the given order number."""
+        token = app_token or LARK_BASE_APP_TOKEN
+        tables = self.get_all_tables(token)
+        order_num_clean = order_num.strip().upper()
+        for table in tables:
+            tid = table["table_id"]
+            tname = table.get("name", "")
+            try:
+                records = self.get_table_records(tid, token)
+                for rec in records:
+                    fields = rec.get("fields", {})
+                    # Check Order # field
+                    raw = fields.get("Order #", "")
+                    val = ""
+                    if isinstance(raw, list):
+                        val = " ".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in raw).strip()
+                    elif isinstance(raw, (str, int, float)):
+                        val = str(raw).strip()
+                    if val.upper() == order_num_clean:
+                        logger.info(f"Found order {order_num} in table {tname}, record {rec.get('record_id')}")
+                        return {"table_id": tid, "table_name": tname, "record_id": rec.get("record_id"), "fields": fields}
+            except Exception as e:
+                logger.error(f"Error searching table {tname}: {e}")
+        return {}
+
+    def update_record_fields(self, table_id: str, record_id: str, fields: dict, app_token: str = None) -> bool:
+        """Update specific fields on a Lark Base record."""
+        token = app_token or LARK_BASE_APP_TOKEN
+        url = (f"{self.base_url}/open-apis/bitable/v1/apps/"
+               f"{token}/tables/{table_id}/records/{record_id}")
+        body = {"fields": fields}
+        resp = requests.put(url, headers=self._headers(), json=body, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise Exception(f"Failed to update record: {data}")
+        logger.info(f"Updated record {record_id} in table {table_id}")
+        return True
+
+    def get_recent_file_from_chat(self, chat_id: str, limit: int = 20) -> dict:
+        """Fetch the most recent file/image message from a chat."""
+        url = f"{self.base_url}/open-apis/im/v1/messages"
+        params = {
+            "container_id_type": "chat",
+            "container_id": chat_id,
+            "page_size": limit,
+            "sort_type": "ByCreateTimeDesc",
+        }
+        resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise Exception(f"Failed to fetch messages: {data}")
+        messages = data.get("data", {}).get("items", [])
+        for msg in messages:
+            msg_type = msg.get("msg_type", "")
+            if msg_type in ("file", "image"):
+                try:
+                    content = json.loads(msg.get("body", {}).get("content", "{}"))
+                    return {
+                        "message_id": msg.get("message_id"),
+                        "msg_type": msg_type,
+                        "file_key": content.get("file_key") or content.get("image_key"),
+                        "file_name": content.get("file_name", f"artwork.{msg_type}"),
+                    }
+                except Exception as e:
+                    logger.error(f"Error parsing file message: {e}")
+        return {}
+
+    def download_file_from_message(self, message_id: str, file_key: str) -> bytes:
+        """Download a file from a Lark message."""
+        url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/resources/{file_key}"
+        params = {"type": "file"}
+        resp = requests.get(url, headers=self._headers(), params=params, timeout=60)
+        resp.raise_for_status()
+        return resp.content
+
+    def upload_file_to_record(self, table_id: str, record_id: str, field_name: str,
+                               file_bytes: bytes, file_name: str, app_token: str = None) -> bool:
+        """Upload a file attachment to a specific field on a Lark Base record."""
+        token = app_token or LARK_BASE_APP_TOKEN
+        # Step 1: Upload file to Lark drive to get a file token
+        upload_url = f"{self.base_url}/open-apis/drive/v1/medias/upload_all"
+        headers = {"Authorization": f"Bearer {self._get_tenant_token()}"}
+        files = {
+            "file": (file_name, file_bytes, "application/octet-stream"),
+            "file_name": (None, file_name),
+            "parent_type": (None, "bitable_file"),
+            "parent_node": (None, token),
+            "size": (None, str(len(file_bytes))),
+        }
+        resp = requests.post(upload_url, headers=headers, files=files, timeout=60)
+        resp.raise_for_status()
+        upload_data = resp.json()
+        if upload_data.get("code") != 0:
+            raise Exception(f"File upload failed: {upload_data}")
+        file_token = upload_data.get("data", {}).get("file_token")
+        logger.info(f"File uploaded, token: {file_token}")
+        # Step 2: Attach file token to the record field
+        return self.update_record_fields(table_id, record_id, {
+            field_name: [{"file_token": file_token, "name": file_name}]
+        }, app_token)
