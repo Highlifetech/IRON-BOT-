@@ -7,7 +7,8 @@ import threading
 import requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from lark_client import LarkClient
 from netsuite_client import NetSuiteClient
 
@@ -16,18 +17,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-genai.configure(api_key=GEMINI_API_KEY)
-
-gemini_model = None
-gemini_model_name = None
-for _name in ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]:
-    try:
-        gemini_model = genai.GenerativeModel(_name)
-        gemini_model_name = _name
-        logger.info("Gemini model loaded: " + _name)
-        break
-    except Exception as _e:
-        logger.warning("Model " + _name + " failed: " + str(_e))
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+gemini_model_name = "gemini-2.0-flash"
+logger.info("Gemini client ready, model: " + gemini_model_name)
 
 processed_message_ids = set()
 lark = LarkClient()
@@ -209,7 +201,7 @@ def fetch_netsuite_data(question):
 
 
 def ask_gemini(question, projects, netsuite_data=None):
-    if not gemini_model:
+    if not gemini_client:
         return "AI model not available. Check GEMINI_API_KEY."
 
     relevant = filter_relevant_projects(question, projects)
@@ -233,7 +225,7 @@ def ask_gemini(question, projects, netsuite_data=None):
         "\nQuestion: " + question + "\nAnswer:"
     )
     try:
-        resp = gemini_model.generate_content(prompt)
+        resp = gemini_client.models.generate_content(model=gemini_model_name, contents=prompt)
         answer = resp.text.strip()
         logger.info("Gemini replied: " + str(len(answer)) + " chars")
         return answer
