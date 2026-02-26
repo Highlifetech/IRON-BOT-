@@ -193,7 +193,7 @@ class LarkClient:
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "🤖 HLT Production Assistant"},
+                "title": {"tag": "plain_text", "content": "🤖 IRON BOT"},
                 "template": "blue",
             },
             "elements": [{"tag": "markdown", "content": text_content}],
