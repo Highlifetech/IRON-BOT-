@@ -1,11 +1,13 @@
 import os
 import logging
 import json
+import re
 import requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 from lark_client import LarkClient
+from netsuite_client import NetSuiteClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ for _name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]:
 
 processed_message_ids = set()
 lark = LarkClient()
+netsuite = NetSuiteClient()
 
 
 def fetch_all_projects():
@@ -89,15 +92,57 @@ def build_context(projects):
     return "\n".join(lines)
 
 
-def ask_gemini(question, projects):
+def detect_netsuite_query(question):
+    q = question.lower()
+    shipping_keywords = [
+        "ship", "tracking", "shipment", "transit", "order status",
+        "fulfillment", "so-", "sales order", "netsuite", "shipped",
+        "delivery", "carrier", "fedex", "ups", "usps", "dhl", "in transit"
+    ]
+    return any(kw in q for kw in shipping_keywords)
+
+
+def fetch_netsuite_shipping(question):
+    so_match = re.search(r'\bso[\s\-]?(\d+)\b', question, re.IGNORECASE)
+    order_num = so_match.group(0).replace(" ", "-").upper() if so_match else None
+    num_match = re.search(r'\b(\d{4,})\b', question)
+    if not order_num and num_match:
+        order_num = num_match.group(1)
+    try:
+        if order_num:
+            data = netsuite.get_shipment_by_order(order_num)
+        else:
+            data = netsuite.get_recent_shipments()
+        return data
+    except Exception as e:
+        logger.error("NetSuite error: " + str(e))
+        return {"error": str(e)}
+
+
+def ask_gemini(question, projects, netsuite_data=None):
     if not gemini_model:
         return "AI model not available. Check GEMINI_API_KEY."
     context = build_context(projects)
-    prompt = ("You are a helpful assistant for HLT (Highlife Tech).\n"
-              "Lucy boards belong to Lucy, Hannah boards to Hannah, others to Brendan.\n"
-              "Answer concisely. Use bullet points. Highlight overdue items.\n\n"
-              "--- PROJECT DATA ---\n" + context + "\n--- END ---\n\n"
-              "Question: " + question + "\nAnswer:")
+
+    netsuite_section = ""
+    if netsuite_data:
+        if "error" in netsuite_data:
+            netsuite_section = "\n--- NETSUITE DATA ---\nError: " + netsuite_data["error"] + "\n--- END NETSUITE ---\n"
+        else:
+            netsuite_section = "\n--- NETSUITE SHIPPING DATA ---\n" + json.dumps(netsuite_data, indent=2)[:3000] + "\n--- END NETSUITE ---\n"
+
+    prompt = (
+        "You are the HLT (Highlife Tech) Production Assistant — a general-purpose bot for all things production, projects, shipping, and operations at Highlife Tech.\n"
+        "You have access to ALL Lark Base boards and NetSuite shipping data.\n"
+        "Board ownership: tables with Lucy in the name belong to Lucy, Hannah to Hannah, everything else to Brendan.\n"
+        "Be helpful and concise. Use bullet points for lists. Highlight overdue or urgent items.\n"
+        "If asked about shipping, tracking or orders, prioritize NetSuite data.\n"
+        "If asked about production boards, tasks or projects, use Lark data.\n"
+        "You can answer general production and operations questions even if specific data is not available.\n\n"
+        "--- LARK PROJECT DATA ---\n" + context + "\n--- END LARK DATA ---\n"
+        + netsuite_section +
+        "\nQuestion: " + question + "\nAnswer:"
+    )
     try:
         resp = gemini_model.generate_content(prompt)
         answer = resp.text.strip()
@@ -148,13 +193,20 @@ def webhook():
     if not chat_id:
         return jsonify({"code": 0})
     logger.info("Question: " + repr(user_text) + " chat=" + chat_id)
+
+    netsuite_data = None
+    if detect_netsuite_query(user_text):
+        logger.info("NetSuite query detected")
+        netsuite_data = fetch_netsuite_shipping(user_text)
+
     projects = fetch_all_projects()
-    if not projects:
+    if not projects and not netsuite_data:
         answer = "Could not load project data. Check bot access to Lark Base."
     else:
-        answer = ask_gemini(user_text, projects)
+        answer = ask_gemini(user_text, projects, netsuite_data)
+
     try:
-        lark.send_group_message(answer, chat_id=chat_id)
+        lark.send_response(answer, chat_id=chat_id)
     except Exception as e:
         logger.error("Send failed: " + str(e))
     return jsonify({"code": 0})
@@ -170,6 +222,7 @@ def debug():
     result["lark_base_url"] = os.environ.get("LARK_BASE_URL", "not set")
     result["gemini_ready"] = gemini_model is not None
     result["gemini_model"] = gemini_model_name
+    result["netsuite_configured"] = bool(os.environ.get("NETSUITE_ACCOUNT_ID"))
 
     try:
         token = lark._get_tenant_token()
