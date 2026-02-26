@@ -1,4 +1,5 @@
-""" Lark API Client for Project Due Date Tracker Bot
+"""
+Lark API Client for HLT Production Bot
 
 Handles authentication, auto-discovering all tables in a Lark Base,
 reading records, and sending group chat notifications.
@@ -82,7 +83,7 @@ class LarkClient:
         return result
 
     def get_all_table_ids(self, app_token: str = None) -> list:
-        """Fetch all table IDs (for backward compatibility with bot_server.py)."""
+        """Fetch all table IDs."""
         return [t["table_id"] for t in self.get_all_tables(app_token)]
 
     # -------------------------------------------------------------------------
@@ -115,7 +116,7 @@ class LarkClient:
             page_token = data.get("data", {}).get("page_token")
             if not has_more:
                 break
-        logger.info(f"  Fetched {len(records)} records from table {table_id}")
+        logger.info(f" Fetched {len(records)} records from table {table_id}")
         return records
 
     def parse_record(self, record: dict) -> dict:
@@ -151,13 +152,13 @@ class LarkClient:
             return str(val).strip() if val else ""
 
         return {
-            "record_id":   record.get("record_id", ""),
-            "order_num":   get_text(FIELD_ORDER_NUM),
-            "order_date":  get_date_ms(FIELD_ORDER_DATE),
+            "record_id": record.get("record_id", ""),
+            "order_num": get_text(FIELD_ORDER_NUM),
+            "order_date": get_date_ms(FIELD_ORDER_DATE),
             "due_date_ms": get_date_ms(FIELD_DUE_DATE),
-            "status":      get_status(FIELD_STATUS),
+            "status": get_status(FIELD_STATUS),
             "description": get_text(FIELD_DESCRIPTION),
-            "address":     get_text(FIELD_ADDRESS),
+            "address": get_text(FIELD_ADDRESS),
             "qty_ordered": get_text(FIELD_QTY_ORDERED),
         }
 
@@ -165,11 +166,12 @@ class LarkClient:
     # Messaging
     # -------------------------------------------------------------------------
 
+    def send_response(self, message: str, chat_id: str = None):
+        """Send a response message to the chat where the question came from."""
+        return self.send_group_message(message, chat_id=chat_id)
+
     def send_group_message(self, message: str, chat_id: str = None):
-        """Send an interactive card message to a Lark group chat.
-        
-        chat_id: if provided, send to this chat. Otherwise logs a warning.
-        """
+        """Send an interactive card message to a Lark group chat."""
         if not chat_id:
             logger.warning("No chat_id provided, skipping message")
             return
@@ -191,8 +193,8 @@ class LarkClient:
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "📋 HLT Project Due Date Reminder"},
-                "template": "orange",
+                "title": {"tag": "plain_text", "content": "🤖 HLT Production Assistant"},
+                "template": "blue",
             },
             "elements": [{"tag": "markdown", "content": text_content}],
         }
