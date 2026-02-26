@@ -1,27 +1,37 @@
 """
-Lark Project Due Date Tracker Bot — Main Entry Point
+Lark Project Due Date Tracker — Main Entry Point
 
-Automatically discovers all tables (boards) in your Lark Base,
-checks each project's due date, and sends warnings to your group chat at:
-  - 3 weeks before due date
-  - 2 weeks before due date
-  - 1 week before due date
+Runs twice daily (8am + 8pm EST via GitHub Actions cron).
+Scans all tables in the Lark Base, checks due dates, and sends
+warnings to the appropriate Lark group chat:
+  - Projects in Hannah's tables → PRODUCTION (HANNAH) chat
+  - Projects in Lucy's tables   → PRODUCTION (LUCY) chat
+  - Unknown tables              → both chats
 
-Runs twice a day (8am and 8pm) via GitHub Actions.
-Projects marked as "Shipped" are automatically skipped.
+Warning windows (to avoid double-firing at 8am and 8pm):
+  3 weeks: days_left in (14, 21]
+  2 weeks: days_left in (7,  14]
+  1 week:  days_left in (0,   7]
 
-Usage:
-    python main.py            # Run once (live)
-    python main.py --dry-run  # Print what would be sent without messaging
+Projects with status "Shipped" are skipped.
 """
+
 import sys
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime
 
 from config import (
-    DONE_STATUS,
+    LARK_BASE_APP_TOKEN,
+    LARK_CHAT_ID_HANNAH,
+    LARK_CHAT_ID_LUCY,
     WARNING_DAYS,
     WARNING_LABELS,
+    DONE_STATUS,
+    FIELD_DUE_DATE,
+    FIELD_STATUS,
+    FIELD_ORDER_NUM,
+    FIELD_DESCRIPTION,
+    CHAT_ROUTING,
 )
 from lark_client import LarkClient
 
@@ -32,137 +42,126 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def days_until_due(due_date_ms: int) -> int:
-    """Return number of whole days from now until the due date."""
-    now_ms  = datetime.now(timezone.utc).timestamp() * 1000
-    diff_ms = due_date_ms - now_ms
-    return int(diff_ms / (1000 * 60 * 60 * 24))
+def days_until(due_date_str: str) -> int | None:
+    """Return days from today until due_date_str, or None if unparseable."""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+        try:
+            due = datetime.strptime(due_date_str.strip()[:10], fmt).date()
+            return (due - date.today()).days
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
-def format_date(ms: int) -> str:
-    """Format a millisecond timestamp as 'Mon, Feb 25 2026'."""
-    if not ms:
-        return "N/A"
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return dt.strftime("%a, %b %-d %Y")
+def in_warning_window(days_left: int, threshold: int) -> bool:
+    """
+    Return True if days_left falls in the half-open window
+    (threshold-7, threshold] so each threshold fires exactly once
+    across the two daily runs.
+    """
+    return (threshold - 7) < days_left <= threshold
 
 
-def urgency_emoji(days: int) -> str:
-    if days <= 7:
-        return "🔴"
-    elif days <= 14:
-        return "🟠"
-    else:
-        return "🟡"
+def route_chat_ids(table_name: str) -> list:
+    """Return list of chat IDs to notify based on table name."""
+    name_lower = table_name.lower()
+    for keyword, chat_id in CHAT_ROUTING.items():
+        if keyword in name_lower and chat_id:
+            return [chat_id]
+    # Unknown table — send to both
+    chat_ids = []
+    if LARK_CHAT_ID_HANNAH:
+        chat_ids.append(LARK_CHAT_ID_HANNAH)
+    if LARK_CHAT_ID_LUCY:
+        chat_ids.append(LARK_CHAT_ID_LUCY)
+    return chat_ids
 
 
-def build_message(warnings: list) -> str:
-    """Build the group chat card message, grouped by warning threshold."""
-    by_threshold = {}
-    for w in warnings:
-        by_threshold.setdefault(w["threshold"], []).append(w)
+def build_warning_message(warnings: dict) -> str:
+    """
+    Build the warning message text.
+    warnings = {threshold: [(table_name, record), ...]}
+    """
+    lines = ["**HLT Project Due Date Tracker**"]
+    color = {21: "🟡", 14: "🟠", 7: "🔴"}
 
-    lines = ["**📋 HLT Project Due Date Reminder**"]
-    lines.append(f"*{datetime.now(timezone.utc).strftime('%A, %B %-d %Y')}*")
-    lines.append("")
+    for threshold in sorted(warnings.keys(), reverse=True):
+        items = warnings[threshold]
+        if not items:
+            continue
+        label = WARNING_LABELS[threshold]
+        lines.append(f"\n{color[threshold]} **Due in {label}:**")
+        for table_name, record in items:
+            fields = record.get("fields", {})
+            order_num   = fields.get(FIELD_ORDER_NUM, "N/A")
+            description = fields.get(FIELD_DESCRIPTION, "")
+            due_date    = fields.get(FIELD_DUE_DATE, "")
+            if isinstance(due_date, dict):
+                # Lark sometimes returns date as {"timestamp": ...}
+                ts = due_date.get("timestamp", 0)
+                due_date = datetime.utcfromtimestamp(int(ts)/1000).strftime("%Y-%m-%d") if ts else ""
+            desc_part = f" — {description}" if description else ""
+            lines.append(f"  • **{order_num}**{desc_part} (due {due_date}) [{table_name}]")
 
-    for days in sorted(by_threshold.keys()):
-        label = WARNING_LABELS[days]
-        items = by_threshold[days]
-        emoji = urgency_emoji(days)
-        count = len(items)
-        lines.append(f"**{emoji} Due in {label} ({count} project{'s' if count != 1 else ''})**")
-
-        for w in items:
-            due_str = format_date(w["due_date_ms"])
-            order   = w["order_num"]   or "—"
-            desc    = w["description"] or "—"
-            qty     = w["qty_ordered"] or "—"
-            status  = w["status"]      or "—"
-            days_left = w["days_left"]
-
-            lines.append(
-                f"• **{order}** — {desc}\n"
-                f"  Due: {due_str} ({days_left} days left) | Qty: {qty} | Status: {status}"
-            )
-        lines.append("")
-
-    return "\n".join(lines).strip()
+    return "\n".join(lines)
 
 
 def main():
-    dry_run = "--dry-run" in sys.argv
-    if dry_run:
-        logger.info("=== DRY RUN — no messages will be sent ===")
-
     lark = LarkClient()
 
-    # Auto-discover all tables — no need to configure them manually
-    try:
-        table_ids = lark.get_all_table_ids()
-    except Exception as e:
-        logger.error(f"Failed to discover tables: {e}")
-        sys.exit(1)
+    logger.info("Discovering all tables in Lark Base...")
+    tables = lark.get_all_tables(LARK_BASE_APP_TOKEN)
+    logger.info(f"Found {len(tables)} tables")
 
-    if not table_ids:
-        logger.error("No tables found in Base. Check LARK_BASE_APP_TOKEN.")
-        sys.exit(1)
+    # warnings_by_chat = {chat_id: {threshold: [items]}}
+    warnings_by_chat: dict = {}
 
-    warnings = []
+    for table in tables:
+        table_id   = table["table_id"]
+        table_name = table["name"]
+        logger.info(f"Scanning table: {table_name} ({table_id})")
 
-    for table_id in table_ids:
-        logger.info(f"Reading table: {table_id}")
-        try:
-            records = lark.get_table_records(table_id)
-        except Exception as e:
-            logger.error(f"  Failed to read table {table_id}: {e}")
-            continue
+        records = lark.get_all_records(LARK_BASE_APP_TOKEN, table_id)
+        logger.info(f"  {len(records)} records")
 
-        for raw in records:
-            project = lark.parse_record(raw)
+        target_chat_ids = route_chat_ids(table_name)
 
-            # Skip shipped / done projects
-            if project["status"].lower() == DONE_STATUS.lower():
-                logger.info(f"  Skipping {project['order_num']} — status: {project['status']}")
+        for record in records:
+            fields = record.get("fields", {})
+            status = str(fields.get(FIELD_STATUS, "") or "").strip()
+            if status.lower() == DONE_STATUS.lower():
                 continue
 
-            due_ms = project["due_date_ms"]
-            if not due_ms:
-                logger.info(f"  Skipping {project['order_num']} — no due date set")
+            due_raw = fields.get(FIELD_DUE_DATE, "")
+            if isinstance(due_raw, dict):
+                ts = due_raw.get("timestamp", 0)
+                due_str = datetime.utcfromtimestamp(int(ts)/1000).strftime("%Y-%m-%d") if ts else ""
+            else:
+                due_str = str(due_raw or "").strip()
+
+            if not due_str:
                 continue
 
-            days_left = days_until_due(due_ms)
-            logger.info(f"  {project['order_num']} — {days_left} days until due")
+            days_left = days_until(due_str)
+            if days_left is None:
+                continue
 
-            # Check if this run falls within a warning window
-            # Window is threshold-1 < days_left <= threshold to avoid double-firing
             for threshold in WARNING_DAYS:
-                if threshold - 1 < days_left <= threshold:
-                    logger.info(f"    → Sending {WARNING_LABELS[threshold]} warning")
-                    warnings.append({
-                        **project,
-                        "days_left": days_left,
-                        "threshold": threshold,
-                    })
-                    break
+                if in_warning_window(days_left, threshold):
+                    for chat_id in target_chat_ids:
+                        if chat_id not in warnings_by_chat:
+                            warnings_by_chat[chat_id] = {t: [] for t in WARNING_DAYS}
+                        warnings_by_chat[chat_id][threshold].append((table_name, record))
 
-    logger.info(f"Total warnings to send: {len(warnings)}")
-
-    if not warnings:
-        logger.info("No projects hitting a warning threshold right now. No message sent.")
+    if not warnings_by_chat:
+        logger.info("No warnings to send today.")
         return
 
-    message = build_message(warnings)
-
-    if dry_run:
-        logger.info("Message that would be sent:")
-        print(message)
-    else:
-        try:
-            lark.send_group_message(message)
-            logger.info("Warning message sent to group chat")
-        except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+    for chat_id, warnings in warnings_by_chat.items():
+        if any(warnings[t] for t in WARNING_DAYS):
+            msg = build_warning_message(warnings)
+            lark.send_group_message(msg, chat_id=chat_id)
+            logger.info(f"Sent warnings to chat {chat_id}")
 
     logger.info("Done!")
 
