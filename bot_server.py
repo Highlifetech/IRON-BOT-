@@ -200,7 +200,7 @@ def fetch_netsuite_data(question):
 
 
 def ask_gemini(question, projects, netsuite_data=None):
-            if not GEMINI_API_KEY:
+    if not GEMINI_API_KEY:
         return "AI model not available. Check GEMINI_API_KEY."
 
     relevant = filter_relevant_projects(question, projects)
@@ -224,7 +224,7 @@ def ask_gemini(question, projects, netsuite_data=None):
         "\nQuestion: " + question + "\nAnswer:"
     )
     try:
-                resp = genai.GenerativeModel(gemini_model_name).generate_content(prompt)
+        resp = genai.GenerativeModel(gemini_model_name).generate_content(prompt)
         answer = resp.text.strip()
         logger.info("Gemini replied: " + str(len(answer)) + " chars")
         return answer
@@ -327,7 +327,7 @@ def debug():
     result["env_base_token"] = bool(os.environ.get("LARK_BASE_APP_TOKEN"))
     result["base_token_value"] = os.environ.get("LARK_BASE_APP_TOKEN", "")[:8] + "..."
     result["lark_base_url"] = os.environ.get("LARK_BASE_URL", "not set")
-    result["gemini_ready"] = gemini_model is not None
+    result["gemini_ready"] = bool(GEMINI_API_KEY)
     result["gemini_model"] = gemini_model_name
     result["netsuite_configured"] = bool(os.environ.get("NETSUITE_ACCOUNT_ID"))
     result["cache_records"] = len(_cached_projects)
