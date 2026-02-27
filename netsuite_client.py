@@ -38,13 +38,16 @@ class NetSuiteClient:
             self.suiteql_url = ""
 
     def _auth(self):
+        # NetSuite TBA requires uppercase account ID as realm and auth_header signature type
+        realm = NETSUITE_ACCOUNT_ID.upper().replace("-", "_")
         return OAuth1(
             NETSUITE_CONSUMER_KEY,
             NETSUITE_CONSUMER_SECRET,
             NETSUITE_TOKEN_ID,
             NETSUITE_TOKEN_SECRET,
-            realm=NETSUITE_ACCOUNT_ID,
-            signature_method="HMAC-SHA256"
+            realm=realm,
+            signature_method="HMAC-SHA256",
+            signature_type="auth_header"
         )
 
     def _not_configured(self):
