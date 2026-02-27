@@ -545,6 +545,30 @@ def list_chats():
         return jsonify({"error": str(e)})
 
 
+@app.route("/test-netsuite", methods=["GET"])
+def test_netsuite():
+    """Test all NetSuite connections and show exact errors."""
+    if not netsuite.configured:
+        return jsonify({"error": "NetSuite not configured - check env vars"})
+    results = {}
+    try:
+        bal = netsuite.get_customer_balance()
+        results["balance"] = {"ok": "error" not in bal, "preview": str(bal)[:300]}
+    except Exception as e:
+        results["balance"] = {"ok": False, "error": str(e)[:300]}
+    try:
+        addr = netsuite.get_ship_address("test")
+        results["address"] = {"ok": "error" not in addr, "preview": str(addr)[:300]}
+    except Exception as e:
+        results["address"] = {"ok": False, "error": str(e)[:300]}
+    try:
+        ship = netsuite.get_recent_shipments()
+        results["shipments"] = {"ok": "error" not in ship, "preview": str(ship)[:300]}
+    except Exception as e:
+        results["shipments"] = {"ok": False, "error": str(e)[:300]}
+    return jsonify(results)
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "bot_open_id": BOT_OPEN_ID, "model": gemini_model_name})
