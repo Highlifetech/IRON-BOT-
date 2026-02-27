@@ -22,7 +22,7 @@ from config import LARK_CHAT_ID_HANNAH_ARTWORK, LARK_CHAT_ID_LUCY_ARTWORK, FIELD
 
 # Known user open_ids for scoping (set via env vars or defaults)
 HANNAH_OPEN_ID = os.environ.get("HANNAH_OPEN_ID", "ou_42c3063bcfefad67c05c615ba0088146")
-LUCY_OPEN_ID = os.environ.get("LUCY_OPEN_ID", "")
+LUCY_OPEN_ID = os.environ.get("LUCY_OPEN_ID", "ou_0f26700382eae7f58ea889b7e98388b4")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 gemini_model_name = "gemini-2.5-flash"
@@ -158,11 +158,11 @@ def fetch_netsuite_data(question):
         return None
     try:
         if netsuite_type == "balance":
-            return netsuite.get_customer_balances()
+            return netsuite.get_customer_balance()
         elif netsuite_type == "address":
-            return netsuite.get_shipping_addresses()
+            return netsuite.get_ship_address("")
         elif netsuite_type == "shipping":
-            return netsuite.get_shipment_tracking()
+            return netsuite.get_recent_shipments()
     except Exception as e:
         logger.error("NetSuite fetch error: " + str(e))
         return {"error": str(e)}
