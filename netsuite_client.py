@@ -70,7 +70,9 @@ class NetSuiteClient:
             json={"q": query},
             timeout=30
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            logger.error(f"NetSuite SuiteQL {resp.status_code}: {resp.text[:500]}")
+            resp.raise_for_status()
         return resp.json().get("items", [])
 
     # -------------------------------------------------------------------------
