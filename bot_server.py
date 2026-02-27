@@ -242,7 +242,16 @@ def ask_gemini(question, projects, netsuite_data=None, scope="brendan"):
         "Board ownership: tables with Lucy in the name belong to Lucy, Hannah to Hannah, everything else to Brendan.\n"
         "Be helpful and concise. Use bullet points. Highlight overdue or urgent items.\n"
         "For shipping, tracking, addresses and client balances, use the NetSuite data provided.\n"
-        "For production boards and project tasks, use the Lark data.\n\n"
+        "For production boards and project tasks, use the Lark data.\n"
+        "\n"
+        "STATUS DEFINITIONS (use these EXACTLY when filtering):\n"
+        "- 'WAITING ART' = items awaiting artwork / needs artwork design\n"
+        "- 'QUOTE NEEDED' = items that need a price quote only, NOT artwork related\n"
+        "- 'Artwork Confirmed' = artwork approved, moving to production\n"
+        "- 'IN PRODUCTION' = currently being manufactured\n"
+        "- 'Shipped' = completed and shipped\n"
+        "IMPORTANT: When asked about items 'awaiting artwork', ONLY return records where the Status field is exactly 'WAITING ART'. Do NOT include 'QUOTE NEEDED' items.\n"
+        "\n"
         "--- LARK PROJECT DATA ---\n" + context + "\n--- END LARK DATA ---\n"
         + netsuite_section +
         "\nQuestion: " + question + "\nAnswer:"
@@ -522,6 +531,30 @@ def list_chats():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "bot_open_id": BOT_OPEN_ID, "model": gemini_model_name})
+
+
+@app.route("/sample-data", methods=["GET"])
+def sample_data():
+    """Return a sample of records showing field names and status values."""
+    projects = fetch_all_projects()
+    statuses = {}
+    field_names = set()
+    for p in projects:
+        status = str(p.get("Status", p.get("status", "")))
+        if status and status != 'None':
+            statuses[status] = statuses.get(status, 0) + 1
+        for k in p.keys():
+            if not k.startswith("__"):
+                field_names.add(k)
+    samples = []
+    for p in projects[:5]:
+        samples.append({k: str(v)[:100] for k, v in p.items()})
+    return jsonify({
+        "total_records": len(projects),
+        "status_counts": statuses,
+        "field_names": sorted(list(field_names)),
+        "sample_records": samples,
+    })
 
 
 # -------------------------------------------------------------------------
