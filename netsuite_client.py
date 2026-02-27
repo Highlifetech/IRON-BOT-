@@ -2,7 +2,6 @@
 NetSuite REST API Client for Iron Bot
 Handles shipping status, ship-to addresses, and customer balances via TBA OAuth 1.0a.
 """
-
 import os
 import logging
 import json
@@ -11,40 +10,41 @@ from requests_oauthlib import OAuth1
 
 logger = logging.getLogger(__name__)
 
-NETSUITE_ACCOUNT_ID = os.environ.get("NETSUITE_ACCOUNT_ID", "")
-NETSUITE_CONSUMER_KEY = os.environ.get("NETSUITE_CONSUMER_KEY", "")
-NETSUITE_CONSUMER_SECRET = os.environ.get("NETSUITE_CONSUMER_SECRET", "")
-NETSUITE_TOKEN_ID = os.environ.get("NETSUITE_TOKEN_ID", "")
-NETSUITE_TOKEN_SECRET = os.environ.get("NETSUITE_TOKEN_SECRET", "")
-
 
 class NetSuiteClient:
     """Client for NetSuite REST API — shipping, addresses, and balances."""
 
     def __init__(self):
-        self.account_id = NETSUITE_ACCOUNT_ID
+        self.account_id = os.environ.get("NETSUITE_ACCOUNT_ID", "")
         self.configured = bool(
-            NETSUITE_ACCOUNT_ID and
-            NETSUITE_CONSUMER_KEY and
-            NETSUITE_CONSUMER_SECRET and
-            NETSUITE_TOKEN_ID and
-            NETSUITE_TOKEN_SECRET
+            os.environ.get("NETSUITE_ACCOUNT_ID") and
+            os.environ.get("NETSUITE_CONSUMER_KEY") and
+            os.environ.get("NETSUITE_CONSUMER_SECRET") and
+            os.environ.get("NETSUITE_TOKEN_ID") and
+            os.environ.get("NETSUITE_TOKEN_SECRET")
         )
         if self.configured:
-            account_url = NETSUITE_ACCOUNT_ID.lower().replace("_", "-")
+            account_url = self.account_id.lower().replace("_", "-")
             self.suiteql_url = f"https://{account_url}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
         else:
             logger.warning("NetSuite not configured — missing env vars.")
             self.suiteql_url = ""
 
     def _auth(self):
+        # Read credentials fresh each call so Railway variable updates are picked up
+        consumer_key = os.environ.get("NETSUITE_CONSUMER_KEY", "")
+        consumer_secret = os.environ.get("NETSUITE_CONSUMER_SECRET", "")
+        token_id = os.environ.get("NETSUITE_TOKEN_ID", "")
+        token_secret = os.environ.get("NETSUITE_TOKEN_SECRET", "")
+        account_id = os.environ.get("NETSUITE_ACCOUNT_ID", "")
         # NetSuite TBA requires uppercase account ID as realm and auth_header signature type
-        realm = NETSUITE_ACCOUNT_ID.upper().replace("-", "_")
+        realm = account_id.upper().replace("-", "_")
+        logger.info(f"NetSuite auth: account={account_id}, token_id={token_id[:8]}..., realm={realm}")
         return OAuth1(
-            NETSUITE_CONSUMER_KEY,
-            NETSUITE_CONSUMER_SECRET,
-            NETSUITE_TOKEN_ID,
-            NETSUITE_TOKEN_SECRET,
+            consumer_key,
+            consumer_secret,
+            token_id,
+            token_secret,
             realm=realm,
             signature_method="HMAC-SHA256",
             signature_type="auth_header"
@@ -185,12 +185,10 @@ class NetSuiteClient:
         """Get outstanding balance for a specific customer or all customers."""
         if not self.configured:
             return self._not_configured()
-
         where = ""
         if customer_name:
             clean = customer_name.replace("'", "''")
             where = f"AND UPPER(cust.companyname) LIKE '%{clean.upper()}%'"
-
         query = f"""
             SELECT
                 cust.companyname     AS customer,
