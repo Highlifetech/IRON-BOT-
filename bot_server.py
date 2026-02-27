@@ -172,12 +172,45 @@ def fetch_netsuite_data(question):
 # -------------------------------------------------------------------------
 # Lark project fetching
 # -------------------------------------------------------------------------
+# Cache for Lark project data
+_projects_cache = []
+_projects_cache_time = 0
+PROJECTS_CACHE_TTL = 120  # seconds
+
+
 def fetch_all_projects():
+    """Fetch all records from all Lark Base tables, with caching."""
+    global _projects_cache, _projects_cache_time
+    now = time.time()
+    if _projects_cache and (now - _projects_cache_time) < PROJECTS_CACHE_TTL:
+        logger.info("Using cached Lark data: " + str(len(_projects_cache)) + " records")
+        return _projects_cache
     try:
-        return lark.get_all_records()
+        tables = lark.get_all_tables()
+        all_records = []
+        for table in tables:
+            table_id = table.get("table_id", "")
+            table_name = table.get("name", table_id)
+            if not table_id:
+                continue
+            try:
+                raw_records = lark.get_table_records(table_id)
+                for raw in raw_records:
+                    # Flatten: pull fields to top level
+                    flat = dict(raw.get("fields", {}))
+                    flat["__table_name__"] = table_name
+                    flat["__record_id__"] = raw.get("record_id", "")
+                    all_records.append(flat)
+                logger.info("Fetched " + str(len(raw_records)) + " records from " + table_name)
+            except Exception as e:
+                logger.warning("Failed to fetch table " + table_name + ": " + str(e)[:80])
+        _projects_cache = all_records
+        _projects_cache_time = now
+        logger.info("Total records fetched: " + str(len(all_records)))
+        return all_records
     except Exception as e:
         logger.error("Lark fetch error: " + str(e))
-        return []
+        return _projects_cache  # Return stale cache if available
 
 
 # -------------------------------------------------------------------------
