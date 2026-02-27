@@ -17,6 +17,7 @@ app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 LARK_APP_ID = os.environ.get("LARK_APP_ID", "")
+BOT_NAME = os.environ.get("BOT_NAME", "Iron Bot")  # Set to the bot's display name in Lark
 from config import LARK_CHAT_ID_HANNAH_ARTWORK, LARK_CHAT_ID_LUCY_ARTWORK, FIELD_PRODUCTION_DRAWING, ARTWORK_CONFIRMED_STATUS
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -30,8 +31,31 @@ DEDUP_TTL = 300
 # Store last webhook payloads for debugging
 _last_webhooks = []
 
+# Bot's own open_id - fetched at startup
+BOT_OPEN_ID = None
+
 lark = LarkClient()
 netsuite = NetSuiteClient()
+
+def _fetch_bot_open_id():
+    """Fetch the bot's own open_id from Lark API so we can identify when it's mentioned."""
+    global BOT_OPEN_ID
+    try:
+        url = lark.base_url + "/open-apis/bot/v3/info"
+        resp = requests.get(url, headers=lark._headers(), timeout=10)
+        data = resp.json()
+        if data.get("code") == 0:
+            bot_info = data.get("bot", {})
+            BOT_OPEN_ID = bot_info.get("open_id", "")
+            bot_name = bot_info.get("app_name", "")
+            logger.info("Bot open_id: " + BOT_OPEN_ID + ", name: " + bot_name)
+        else:
+            logger.warning("Could not fetch bot info: " + str(data))
+    except Exception as e:
+        logger.error("Failed to fetch bot open_id: " + str(e))
+
+# Fetch bot identity at startup
+_fetch_bot_open_id()
 
 # -------------------------------------------------------------------------
 # Cache
@@ -276,12 +300,13 @@ def handle_artwork_approval(order_num, user_text, chat_id):
             f"{file_msg}")
 
 # -------------------------------------------------------------------------
-# Message parsing - STRICT: only respond when bot is 100% @mentioned
+# Message parsing - check bot's open_id against mention IDs
 # -------------------------------------------------------------------------
 def extract_question(msg):
     """
-    Returns the question text ONLY if the bot was directly @mentioned.
-    Logs the full mention data so we can debug.
+    Returns question text ONLY if the bot was directly @mentioned.
+    Uses the bot's open_id (fetched at startup) to identify bot mentions.
+    Falls back to BOT_NAME string match.
     """
     try:
         content = json.loads(msg.get("content", "{}"))
@@ -291,39 +316,43 @@ def extract_question(msg):
     if not raw_text:
         return None
 
-    mentions = msg.get("mentions", [])
-    logger.info("Mentions received: " + json.dumps(mentions))
-    logger.info("Raw text: " + repr(raw_text[:100]))
-
-    # Direct/P2P chat: always respond (no @mention needed)
+    # Direct/P2P chat: always respond
     if msg.get("chat_type", "") == "p2p":
         return raw_text
 
-    # Group chat: ONLY respond if the bot itself is in the mentions list
-    # Lark marks the bot mention with key="@_user_1" in the mentions array
-    # and the mention appears as @IronBot or similar in the text
+    # Group chat: ONLY respond if bot itself is in mentions
+    mentions = msg.get("mentions", [])
+    logger.info("Checking " + str(len(mentions)) + " mentions, bot_open_id=" + str(BOT_OPEN_ID))
+
     bot_mentioned = False
     for mention in mentions:
-        key = mention.get("key", "")
-        name = mention.get("name", "")
-        logger.info("Checking mention: key=" + key + " name=" + name)
-        # Bot mentions have key "@_user_1" — human mentions use "@_user_2", "@_user_3" etc.
-        # OR the name matches "Iron Bot" / "IronBot"
-        if key == "@_user_1":
+        mid = mention.get("id", {})
+        mention_open_id = mid.get("open_id", "")
+        mention_name = mention.get("name", "")
+        logger.info("Mention: open_id=" + mention_open_id + " name=" + mention_name)
+
+        # Primary check: match on open_id (most reliable)
+        if BOT_OPEN_ID and mention_open_id == BOT_OPEN_ID:
             bot_mentioned = True
             break
-        if "iron" in name.lower() or "bot" in name.lower():
+
+        # Fallback: match on display name (case-insensitive)
+        if BOT_NAME and BOT_NAME.lower() in mention_name.lower():
+            bot_mentioned = True
+            break
+
+        # Fallback: match on LARK_APP_ID in union_id or other fields
+        if LARK_APP_ID and LARK_APP_ID in mention_open_id:
             bot_mentioned = True
             break
 
     if not bot_mentioned:
-        logger.info("Bot NOT mentioned - ignoring message")
+        logger.info("Bot NOT mentioned (open_ids did not match) - ignoring")
         return None
 
-    # Strip the @mention prefix from the text before passing to AI
-    # Lark text looks like: "@IronBot what orders are pending?"
-    cleaned = re.sub(r'^@\S+\s*', '', raw_text).strip()
-    logger.info("Bot IS mentioned - question: " + repr(cleaned[:100]))
+    # Strip leading @mention tokens from text
+    cleaned = re.sub(r'^@[^\s]+\s*', '', raw_text).strip()
+    logger.info("Bot IS mentioned - responding to: " + repr(cleaned[:80]))
     return cleaned if cleaned else None
 
 def _is_already_processed(message_id):
@@ -375,48 +404,36 @@ def _process_message(user_text, chat_id, artwork_order):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.get_json(silent=True) or {}
-
-    # Store for debugging (keep last 5)
     _last_webhooks.append(body)
     if len(_last_webhooks) > 5:
         _last_webhooks.pop(0)
-
     if body.get("type") == "url_verification":
         return jsonify({"challenge": body.get("challenge", "")})
-
     event = body.get("event", {})
     msg = event.get("message", {})
-
     if msg.get("message_type") != "text":
         return jsonify({"code": 0})
-
     message_id = msg.get("message_id", "")
     if _is_already_processed(message_id):
         logger.info("Duplicate message ignored: " + message_id)
         return jsonify({"code": 0})
-
     user_text = extract_question(msg)
     if not user_text:
         return jsonify({"code": 0})
-
     chat_id = msg.get("chat_id", "")
     if not chat_id:
         return jsonify({"code": 0})
-
     logger.info("Question: " + repr(user_text) + " chat=" + chat_id)
     artwork_order = detect_artwork_approval(user_text)
-
     threading.Thread(
         target=_process_message,
         args=(user_text, chat_id, artwork_order),
         daemon=True
     ).start()
-
     return jsonify({"code": 0})
 
 @app.route("/last-webhook", methods=["GET"])
 def last_webhook():
-    """Show last 5 webhook payloads for debugging mention structure."""
     safe = []
     for body in _last_webhooks:
         event = body.get("event", {})
@@ -425,9 +442,9 @@ def last_webhook():
             "chat_type": msg.get("chat_type"),
             "message_type": msg.get("message_type"),
             "mentions": msg.get("mentions", []),
-            "content_preview": msg.get("content", "")[:100],
+            "content_preview": msg.get("content", "")[:150],
         })
-    return jsonify({"last_webhooks": safe, "count": len(safe)})
+    return jsonify({"last_webhooks": safe, "bot_open_id": BOT_OPEN_ID, "bot_name": BOT_NAME})
 
 @app.route("/refresh", methods=["GET"])
 def refresh():
@@ -440,8 +457,9 @@ def debug():
     result["env_app_id"] = bool(os.environ.get("LARK_APP_ID"))
     result["env_app_secret"] = bool(os.environ.get("LARK_APP_SECRET"))
     result["env_base_token"] = bool(os.environ.get("LARK_BASE_APP_TOKEN"))
-    result["base_token_value"] = os.environ.get("LARK_BASE_APP_TOKEN", "")[:8] + "..."
     result["lark_app_id_prefix"] = LARK_APP_ID[:8] + "..." if LARK_APP_ID else "not set"
+    result["bot_open_id"] = BOT_OPEN_ID or "not fetched yet"
+    result["bot_name"] = BOT_NAME
     result["gemini_ready"] = gemini_client is not None
     result["gemini_model"] = gemini_model_name
     result["netsuite_configured"] = bool(os.environ.get("NETSUITE_ACCOUNT_ID"))
@@ -486,7 +504,7 @@ def list_chats():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "gemini_model": gemini_model_name, "cache_records": len(_cached_projects)})
+    return jsonify({"status": "ok", "gemini_model": gemini_model_name, "bot_open_id": BOT_OPEN_ID, "cache_records": len(_cached_projects)})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
