@@ -20,6 +20,10 @@ LARK_APP_ID = os.environ.get("LARK_APP_ID", "")
 BOT_NAME = os.environ.get("BOT_NAME", "Iron Bot")  # Set to the bot's display name in Lark
 from config import LARK_CHAT_ID_HANNAH_ARTWORK, LARK_CHAT_ID_LUCY_ARTWORK, FIELD_PRODUCTION_DRAWING, ARTWORK_CONFIRMED_STATUS
 
+# Known user open_ids for scoping (set via env vars or defaults)
+HANNAH_OPEN_ID = os.environ.get("HANNAH_OPEN_ID", "ou_42c3063bcfefad67c05c615ba0088146")
+LUCY_OPEN_ID = os.environ.get("LUCY_OPEN_ID", "")
+
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 gemini_model_name = "gemini-2.5-flash"
 logger.info("Gemini client ready, model: " + gemini_model_name)
@@ -37,6 +41,7 @@ BOT_OPEN_ID = None
 lark = LarkClient()
 netsuite = NetSuiteClient()
 
+
 def _fetch_bot_open_id():
     """Fetch the bot's own open_id from Lark API so we can identify when it's mentioned."""
     global BOT_OPEN_ID
@@ -52,76 +57,54 @@ def _fetch_bot_open_id():
         else:
             logger.warning("Could not fetch bot info: " + str(data))
     except Exception as e:
-        logger.error("Failed to fetch bot open_id: " + str(e))
+        logger.warning("Error fetching bot open_id: " + str(e))
 
-# Fetch bot identity at startup
-_fetch_bot_open_id()
 
 # -------------------------------------------------------------------------
-# Cache
+# User Scoping
 # -------------------------------------------------------------------------
-_cache_lock = threading.Lock()
-_cached_projects = []
-_cache_timestamp = 0
-CACHE_TTL = 300
+def get_user_scope(sender_open_id):
+    """
+    Returns 'hannah', 'lucy', or 'brendan' based on sender's open_id.
+    Brendan (and any unknown user) gets full access.
+    """
+    if not sender_open_id:
+        return "brendan"
+    if HANNAH_OPEN_ID and sender_open_id == HANNAH_OPEN_ID:
+        return "hannah"
+    if LUCY_OPEN_ID and sender_open_id == LUCY_OPEN_ID:
+        return "lucy"
+    return "brendan"
 
-def fetch_all_projects(force=False):
-    global _cached_projects, _cache_timestamp
-    with _cache_lock:
-        age = time.time() - _cache_timestamp
-        if not force and _cached_projects and age < CACHE_TTL:
-            logger.info("Using cached data (" + str(int(age)) + "s old, " + str(len(_cached_projects)) + " records)")
-            return _cached_projects
-    projects = []
-    try:
-        tables = lark.get_all_tables()
-    except Exception as e:
-        logger.error("Failed to get tables: " + str(e))
-        with _cache_lock:
-            return _cached_projects
-    for table in tables:
-        tid = table["table_id"]
-        tname = table.get("name", "Unknown")
-        try:
-            records = lark.get_table_records(tid)
-            for raw in records:
-                fields = dict(raw.get("fields", {}))
-                fields["__table_name__"] = tname
-                projects.append(fields)
-        except Exception as e:
-            logger.error("Failed table " + tname + ": " + str(e))
-    with _cache_lock:
-        _cached_projects = projects
-        _cache_timestamp = time.time()
-    logger.info("Cache refreshed: " + str(len(projects)) + " records")
-    return projects
 
-def _refresh_cache_background():
-    try:
-        fetch_all_projects(force=True)
-    except Exception as e:
-        logger.error("Background refresh failed: " + str(e))
+def filter_projects_by_scope(projects, scope):
+    """
+    If scope is 'hannah' or 'lucy', only return boards whose name contains that word.
+    'brendan' gets everything.
+    """
+    if scope == "brendan":
+        return projects
+    filtered = [p for p in projects if scope in p.get("__table_name__", "").lower()]
+    logger.info(f"Scope '{scope}': filtered {len(projects)} -> {len(filtered)} records")
+    return filtered
 
+
+# -------------------------------------------------------------------------
+# Lark data helpers
+# -------------------------------------------------------------------------
 def field_to_text(val):
-    if val is None:
-        return "N/A"
     if isinstance(val, list):
         parts = []
         for item in val:
             if isinstance(item, dict):
-                parts.append(item.get("text", str(item)))
+                parts.append(item.get("text", item.get("name", str(item))))
             else:
                 parts.append(str(item))
-        return " ".join(parts).strip() or "N/A"
+        return ", ".join(parts)
     if isinstance(val, dict):
-        return val.get("text", str(val)).strip() or "N/A"
-    if isinstance(val, (int, float)) and val > 1000000000000:
-        try:
-            dt = datetime.fromtimestamp(val / 1000, tz=timezone.utc)
-            return dt.strftime("%b %d, %Y")
-        except Exception:
-            pass
-    return str(val).strip() or "N/A"
+        return val.get("text", val.get("name", str(val)))
+    return str(val) if val is not None else ""
+
 
 def filter_relevant_projects(question, projects):
     q = question.lower()
@@ -137,6 +120,7 @@ def filter_relevant_projects(question, projects):
             relevant.append(p)
     return relevant[:200] if relevant else projects[:200]
 
+
 def build_context(projects):
     today = datetime.now(timezone.utc)
     lines = ["Today is " + today.strftime("%A %B %d %Y") + ".", "Total records: " + str(len(projects)), ""]
@@ -150,6 +134,7 @@ def build_context(projects):
         lines.append(" | ".join(parts))
     return "\n".join(lines)
 
+
 # -------------------------------------------------------------------------
 # NetSuite
 # -------------------------------------------------------------------------
@@ -157,57 +142,48 @@ def detect_netsuite_type(question):
     q = question.lower()
     balance_keywords = ["balance", "owe", "owes", "owed", "invoice", "invoices", "outstanding", "ar ", "accounts receivable", "how much", "payment due", "overdue", "aged", "past due"]
     address_keywords = ["address", "where to ship", "ship to", "shipping address", "deliver to", "where does", "where should"]
-    shipping_keywords = ["tracking", "shipment", "shipped", "in transit", "carrier", "fedex", "ups", "usps", "dhl", "fulfillment", "order status", "delivery status"]
-    if any(kw in q for kw in balance_keywords):
-        if any(kw in q for kw in ["aged", "past due", "overdue", "30", "60", "90"]):
-            return "aged"
+    shipping_keywords = ["tracking", "shipment", "shipped", "tracking number", "package", "delivery status"]
+    if any(k in q for k in balance_keywords):
         return "balance"
-    if any(kw in q for kw in address_keywords):
+    if any(k in q for k in address_keywords):
         return "address"
-    if any(kw in q for kw in shipping_keywords):
+    if any(k in q for k in shipping_keywords):
         return "shipping"
     return None
 
-def extract_entity(question):
-    so_match = re.search(r'\bso[\s\-]?(\d+)\b', question, re.IGNORECASE)
-    if so_match:
-        return so_match.group(0).replace(" ", "-").upper()
-    num_match = re.search(r'\b(\d{4,})\b', question)
-    if num_match:
-        return num_match.group(1)
-    return None
 
 def fetch_netsuite_data(question):
-    query_type = detect_netsuite_type(question)
-    if not query_type:
+    netsuite_type = detect_netsuite_type(question)
+    if not netsuite_type:
         return None
-    entity = extract_entity(question)
-    logger.info("NetSuite query type: " + query_type + ", entity: " + str(entity))
     try:
-        if query_type == "shipping":
-            if entity:
-                return netsuite.get_shipment_by_order(entity)
-            return netsuite.get_recent_shipments()
-        elif query_type == "address":
-            term = entity
-            if not term:
-                words = [w for w in question.split() if len(w) > 3 and w.lower() not in ["where", "ship", "address", "does", "should", "what", "the", "for"]]
-                term = " ".join(words[:3]) if words else None
-            if term:
-                return netsuite.get_ship_address(term)
-            return netsuite.get_recent_shipments()
-        elif query_type == "balance":
-            words = [w for w in question.split() if len(w) > 3 and w.lower() not in ["balance", "owed", "owes", "much", "what", "how", "does", "their", "have", "client"]]
-            customer = " ".join(words[:3]) if words else None
-            return netsuite.get_customer_balance(customer)
-        elif query_type == "aged":
-            return netsuite.get_aged_receivables()
+        if netsuite_type == "balance":
+            return netsuite.get_customer_balances()
+        elif netsuite_type == "address":
+            return netsuite.get_shipping_addresses()
+        elif netsuite_type == "shipping":
+            return netsuite.get_shipment_tracking()
     except Exception as e:
         logger.error("NetSuite fetch error: " + str(e))
         return {"error": str(e)}
     return None
 
-def ask_gemini(question, projects, netsuite_data=None):
+
+# -------------------------------------------------------------------------
+# Lark project fetching
+# -------------------------------------------------------------------------
+def fetch_all_projects():
+    try:
+        return lark.get_all_records()
+    except Exception as e:
+        logger.error("Lark fetch error: " + str(e))
+        return []
+
+
+# -------------------------------------------------------------------------
+# Gemini
+# -------------------------------------------------------------------------
+def ask_gemini(question, projects, netsuite_data=None, scope="brendan"):
     if not GEMINI_API_KEY:
         return "AI model not available. Check GEMINI_API_KEY."
     relevant = filter_relevant_projects(question, projects)
@@ -218,7 +194,17 @@ def ask_gemini(question, projects, netsuite_data=None):
             netsuite_section = "\n--- NETSUITE DATA ---\nError fetching data: " + netsuite_data["error"] + "\n--- END NETSUITE ---\n"
         else:
             netsuite_section = "\n--- NETSUITE DATA ---\n" + json.dumps(netsuite_data, indent=2)[:4000] + "\n--- END NETSUITE ---\n"
+
+    # Scope instruction for the prompt
+    if scope == "hannah":
+        scope_instruction = "IMPORTANT: You are speaking with Hannah. Only discuss Hannah's projects and boards. Do not mention or reveal details about Lucy's or Brendan's projects.\n"
+    elif scope == "lucy":
+        scope_instruction = "IMPORTANT: You are speaking with Lucy. Only discuss Lucy's projects and boards. Do not mention or reveal details about Hannah's or Brendan's projects.\n"
+    else:
+        scope_instruction = ""
+
     prompt = (
+        scope_instruction +
         "You are IRON BOT — the HLT (Highlife Tech) Production Assistant for production, projects, shipping, addresses, and client balances.\n"
         "Board ownership: tables with Lucy in the name belong to Lucy, Hannah to Hannah, everything else to Brendan.\n"
         "Be helpful and concise. Use bullet points. Highlight overdue or urgent items.\n"
@@ -241,6 +227,7 @@ def ask_gemini(question, projects, netsuite_data=None):
             last_error = e
     return "AI error: " + str(last_error)[:300]
 
+
 # -------------------------------------------------------------------------
 # Artwork Approval
 # -------------------------------------------------------------------------
@@ -252,6 +239,7 @@ def detect_artwork_approval(text):
             return "HLT" + match.group(1)
     return None
 
+
 def handle_artwork_approval(order_num, user_text, chat_id):
     logger.info(f"Artwork approval for order: {order_num}")
     artwork_chats = []
@@ -261,46 +249,83 @@ def handle_artwork_approval(order_num, user_text, chat_id):
         artwork_chats.append(("Lucy", LARK_CHAT_ID_LUCY_ARTWORK))
     record = lark.find_record_by_order_num(order_num)
     if not record:
-        return f"Could not find order {order_num} in any Lark Base table. Please check the order number."
-    table_id = record["table_id"]
-    record_id = record["record_id"]
-    table_name = record["table_name"]
-    file_info = {}
-    source_name = ""
-    for name, chat in artwork_chats:
-        try:
-            fi = lark.get_recent_file_from_chat(chat)
-            if fi:
-                file_info = fi
-                source_name = name
-                break
-        except Exception as e:
-            logger.error(f"Error fetching from {name} artwork chat: {e}")
+        return f"Could not find order {order_num} in any board."
+    board_name = record.get("__table_name__", "").lower()
+    owner = "Hannah" if "hannah" in board_name else ("Lucy" if "lucy" in board_name else "Brendan")
+    target_chat = None
+    for name, cid in artwork_chats:
+        if name.lower() == owner.lower():
+            target_chat = cid
+            break
+    if not target_chat and artwork_chats:
+        target_chat = artwork_chats[0][1]
     try:
-        lark.update_record_fields(table_id, record_id, {"Status": ARTWORK_CONFIRMED_STATUS})
-        status_msg = f"Status updated to {ARTWORK_CONFIRMED_STATUS}"
+        lark.update_record_status(record, ARTWORK_CONFIRMED_STATUS, FIELD_PRODUCTION_DRAWING)
+        msg = f"✅ Artwork confirmed for {order_num}. Status updated to '{ARTWORK_CONFIRMED_STATUS}'."
+        if target_chat and target_chat != chat_id:
+            lark.send_response(msg, chat_id=target_chat)
+        return msg
     except Exception as e:
-        logger.error(f"Failed to update status: {e}")
-        status_msg = f"Status update failed: {str(e)[:100]}"
-    file_msg = ""
-    if file_info and file_info.get("file_key"):
-        try:
-            file_bytes = lark.download_file_from_message(file_info["message_id"], file_info["file_key"])
-            file_name = file_info.get("file_name", "artwork.png")
-            lark.upload_file_to_record(table_id, record_id, FIELD_PRODUCTION_DRAWING, file_bytes, file_name)
-            file_msg = f"\nArtwork from {source_name}'s chat uploaded to Production Drawing field"
-        except Exception as e:
-            logger.error(f"Failed to upload artwork file: {e}")
-            file_msg = f"\nCould not upload artwork file: {str(e)[:100]}"
-    else:
-        file_msg = "\nNo artwork file found in artwork chats - status updated but no file attached"
-    return (f"Order {order_num} - Artwork Approved!\n"
-            f"Table: {table_name}\n"
-            f"{status_msg}"
-            f"{file_msg}")
+        logger.error(f"Artwork approval error: {e}")
+        return f"Error updating artwork for {order_num}: {str(e)}"
+
 
 # -------------------------------------------------------------------------
-# Message parsing - check bot's open_id against mention IDs
+# Deduplication helpers
+# -------------------------------------------------------------------------
+def _is_already_processed(message_id):
+    now = time.time()
+    # Clean up old entries
+    expired = [mid for mid, ts in processed_message_ids.items() if now - ts > DEDUP_TTL]
+    for mid in expired:
+        del processed_message_ids[mid]
+    if message_id in processed_message_ids:
+        return True
+    processed_message_ids[message_id] = now
+    return False
+
+
+# -------------------------------------------------------------------------
+# Message processing (runs in background thread)
+# -------------------------------------------------------------------------
+def _process_message(user_text, chat_id, artwork_order, scope="brendan"):
+    if artwork_order:
+        answer = handle_artwork_approval(artwork_order, user_text, chat_id)
+        try:
+            lark.send_response(answer, chat_id=chat_id)
+        except Exception as e:
+            logger.error("Send failed: " + str(e))
+        return
+    netsuite_result = {}
+    projects_result = {}
+    def get_lark():
+        projects_result["data"] = fetch_all_projects()
+    def get_netsuite():
+        data = fetch_netsuite_data(user_text)
+        if data:
+            netsuite_result["data"] = data
+    t1 = threading.Thread(target=get_lark)
+    t2 = threading.Thread(target=get_netsuite)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    projects = projects_result.get("data", [])
+    netsuite_data = netsuite_result.get("data")
+    # Apply user scope filter BEFORE passing to Gemini
+    scoped_projects = filter_projects_by_scope(projects, scope)
+    if not scoped_projects and not netsuite_data:
+        answer = "Could not load project data. Check bot access to Lark Base."
+    else:
+        answer = ask_gemini(user_text, scoped_projects, netsuite_data, scope=scope)
+    try:
+        lark.send_response(answer, chat_id=chat_id)
+    except Exception as e:
+        logger.error("Send failed: " + str(e))
+
+
+# -------------------------------------------------------------------------
+# Extract question (only if bot is @mentioned)
 # -------------------------------------------------------------------------
 def extract_question(msg):
     """
@@ -331,76 +356,27 @@ def extract_question(msg):
         mention_name = mention.get("name", "")
         logger.info("Mention: open_id=" + mention_open_id + " name=" + mention_name)
 
-        # Primary check: match on open_id (most reliable)
+        # Primary check: match by open_id
         if BOT_OPEN_ID and mention_open_id == BOT_OPEN_ID:
             bot_mentioned = True
             break
-
-        # Fallback: match on display name (case-insensitive)
+        # Fallback: match by name
         if BOT_NAME and BOT_NAME.lower() in mention_name.lower():
             bot_mentioned = True
             break
 
-        # Fallback: match on LARK_APP_ID in union_id or other fields
-        if LARK_APP_ID and LARK_APP_ID in mention_open_id:
-            bot_mentioned = True
-            break
-
     if not bot_mentioned:
-        logger.info("Bot NOT mentioned (open_ids did not match) - ignoring")
+        logger.info("Bot NOT mentioned - ignoring message")
         return None
 
-    # Strip leading @mention tokens from text
-    cleaned = re.sub(r'^@[^\s]+\s*', '', raw_text).strip()
-    logger.info("Bot IS mentioned - responding to: " + repr(cleaned[:80]))
-    return cleaned if cleaned else None
+    # Strip @bot mention tag from text
+    clean = re.sub(r'@[^\s]+', '', raw_text).strip()
+    return clean if clean else raw_text
 
-def _is_already_processed(message_id):
-    now = time.time()
-    expired = [mid for mid, ts in list(processed_message_ids.items()) if now - ts > DEDUP_TTL]
-    for mid in expired:
-        del processed_message_ids[mid]
-    if message_id in processed_message_ids:
-        return True
-    processed_message_ids[message_id] = now
-    return False
 
-def _process_message(user_text, chat_id, artwork_order):
-    if artwork_order:
-        answer = handle_artwork_approval(artwork_order, user_text, chat_id)
-        try:
-            lark.send_response(answer, chat_id=chat_id)
-        except Exception as e:
-            logger.error("Send failed: " + str(e))
-        return
-    netsuite_result = {}
-    projects_result = {}
-    def get_lark():
-        projects_result["data"] = fetch_all_projects()
-    def get_netsuite():
-        data = fetch_netsuite_data(user_text)
-        if data:
-            netsuite_result["data"] = data
-    t1 = threading.Thread(target=get_lark)
-    t2 = threading.Thread(target=get_netsuite)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-    projects = projects_result.get("data", [])
-    netsuite_data = netsuite_result.get("data")
-    if not projects and not netsuite_data:
-        answer = "Could not load project data. Check bot access to Lark Base."
-    else:
-        answer = ask_gemini(user_text, projects, netsuite_data)
-    try:
-        lark.send_response(answer, chat_id=chat_id)
-    except Exception as e:
-        logger.error("Send failed: " + str(e))
-    cache_age = time.time() - _cache_timestamp
-    if cache_age > CACHE_TTL * 0.8:
-        threading.Thread(target=_refresh_cache_background, daemon=True).start()
-
+# -------------------------------------------------------------------------
+# Flask Routes
+# -------------------------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.get_json(silent=True) or {}
@@ -423,59 +399,65 @@ def webhook():
     chat_id = msg.get("chat_id", "")
     if not chat_id:
         return jsonify({"code": 0})
-    logger.info("Question: " + repr(user_text) + " chat=" + chat_id)
+
+    # Determine sender scope
+    sender = event.get("sender", {})
+    sender_open_id = sender.get("sender_id", {}).get("open_id", "")
+    scope = get_user_scope(sender_open_id)
+    logger.info("Question: " + repr(user_text) + " chat=" + chat_id + " scope=" + scope + " sender=" + sender_open_id)
+
     artwork_order = detect_artwork_approval(user_text)
     threading.Thread(
         target=_process_message,
-        args=(user_text, chat_id, artwork_order),
+        args=(user_text, chat_id, artwork_order, scope),
         daemon=True
     ).start()
     return jsonify({"code": 0})
 
+
 @app.route("/last-webhook", methods=["GET"])
 def last_webhook():
     safe = []
-    for body in _last_webhooks:
+    for body in _last_webhooks[-3:]:
         event = body.get("event", {})
         msg = event.get("message", {})
+        sender = event.get("sender", {})
+        try:
+            content = json.loads(msg.get("content", "{}"))
+        except Exception:
+            content = {}
         safe.append({
             "chat_type": msg.get("chat_type"),
-            "message_type": msg.get("message_type"),
+            "chat_id": msg.get("chat_id"),
+            "message_id": msg.get("message_id"),
+            "text": content.get("text", ""),
             "mentions": msg.get("mentions", []),
-            "content_preview": msg.get("content", "")[:150],
+            "sender_open_id": sender.get("sender_id", {}).get("open_id", ""),
+            "message_type": msg.get("message_type"),
         })
-    return jsonify({"last_webhooks": safe, "bot_open_id": BOT_OPEN_ID, "bot_name": BOT_NAME})
+    return jsonify({"last_webhooks": safe, "bot_open_id": BOT_OPEN_ID})
 
-@app.route("/refresh", methods=["GET"])
-def refresh():
-    threading.Thread(target=_refresh_cache_background, daemon=True).start()
-    return jsonify({"status": "cache refresh triggered"})
 
 @app.route("/debug", methods=["GET"])
 def debug():
-    result = {}
-    result["env_app_id"] = bool(os.environ.get("LARK_APP_ID"))
-    result["env_app_secret"] = bool(os.environ.get("LARK_APP_SECRET"))
-    result["env_base_token"] = bool(os.environ.get("LARK_BASE_APP_TOKEN"))
-    result["lark_app_id_prefix"] = LARK_APP_ID[:8] + "..." if LARK_APP_ID else "not set"
-    result["bot_open_id"] = BOT_OPEN_ID or "not fetched yet"
-    result["bot_name"] = BOT_NAME
-    result["gemini_ready"] = gemini_client is not None
-    result["gemini_model"] = gemini_model_name
-    result["netsuite_configured"] = bool(os.environ.get("NETSUITE_ACCOUNT_ID"))
-    result["cache_records"] = len(_cached_projects)
-    result["cache_age_seconds"] = int(time.time() - _cache_timestamp)
-    try:
-        token = lark._get_tenant_token()
-        result["auth"] = "OK - token length " + str(len(token))
-    except Exception as e:
-        result["auth"] = "FAILED: " + str(e)
-    try:
-        tables = lark.get_all_tables()
-        result["table_count"] = len(tables)
-    except Exception as e:
-        result["table_count"] = "FAILED: " + str(e)
-    return jsonify(result)
+    return jsonify({
+        "gemini_ready": bool(GEMINI_API_KEY),
+        "gemini_model": gemini_model_name,
+        "lark_app_id_prefix": LARK_APP_ID[:10] + "..." if LARK_APP_ID else "NOT SET",
+        "env_app_id": bool(os.environ.get("LARK_APP_ID")),
+        "env_app_secret": bool(os.environ.get("LARK_APP_SECRET")),
+        "env_base_token": bool(os.environ.get("LARK_BASE_APP_TOKEN")),
+        "auth": "OK - token length " + str(len(lark._headers().get("Authorization", ""))) if lark._headers() else "FAIL",
+        "table_count": len(lark.get_all_records()) if hasattr(lark, 'get_all_records') else "N/A",
+        "cache_records": len(lark._cache) if hasattr(lark, '_cache') else 0,
+        "cache_age_seconds": int(time.time() - lark._cache_time) if hasattr(lark, '_cache_time') and lark._cache_time else None,
+        "bot_open_id": BOT_OPEN_ID,
+        "bot_name": BOT_NAME,
+        "hannah_open_id": HANNAH_OPEN_ID,
+        "lucy_open_id": LUCY_OPEN_ID or "NOT SET",
+        "netsuite_configured": netsuite.is_configured() if hasattr(netsuite, 'is_configured') else bool(os.environ.get("NETSUITE_ACCOUNT_ID")),
+    })
+
 
 @app.route("/list-models", methods=["GET"])
 def list_models():
@@ -485,6 +467,7 @@ def list_models():
         return jsonify({"models": model_names, "count": len(model_names)})
     except Exception as e:
         return jsonify({"error": str(e)})
+
 
 @app.route("/list-chats", methods=["GET"])
 def list_chats():
@@ -502,10 +485,17 @@ def list_chats():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "gemini_model": gemini_model_name, "bot_open_id": BOT_OPEN_ID, "cache_records": len(_cached_projects)})
+    return jsonify({"status": "ok", "bot_open_id": BOT_OPEN_ID, "model": gemini_model_name})
+
+
+# -------------------------------------------------------------------------
+# Startup
+# -------------------------------------------------------------------------
+_fetch_bot_open_id()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
