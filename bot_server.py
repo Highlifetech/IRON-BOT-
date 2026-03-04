@@ -285,7 +285,6 @@ def ask_gemini(question, projects, netsuite_data=None, scope="brendan"):
             system_instruction=system_prompt,
         )
         response = model.generate_content(user_message)
-        )
         answer = response.text.strip()
         logger.info("Gemini replied: " + str(len(answer)) + " chars")
         return answer
