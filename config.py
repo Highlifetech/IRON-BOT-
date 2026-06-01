@@ -171,3 +171,10 @@ DIGEST_EXCLUDED_BOARDS = {
 # =============================================================================
 ALL_ORDERS_VIEW_KEYWORD = "all orders"
 
+
+
+# =============================================================================
+# ADDITIONAL USER OPEN IDS (added for Chen + Carlo routing)
+# =============================================================================
+CHEN_OPEN_ID = os.environ.get("CHEN_OPEN_ID", "")
+CARLO_OPEN_ID = os.environ.get("CARLO_OPEN_ID", "")
