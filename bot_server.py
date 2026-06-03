@@ -638,7 +638,7 @@ def _fetch_bot_open_id():
 # FEATURE 1 - NOTIFY CARD -> Founders Channel
 # =========================================================================
 def build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key=""):
-    color = "orange" if assigned_to in ("Hannah", "Chen") else "red"
+    color = "orange" if assigned_to == "Hannah" else "red"
     link = record_link(table_id, record_id)
     action_id = f"mark_resolved_{table_id}_{record_id}"
     elements = [{"tag": "markdown", "content": f"**Sales Order:** {order_num}\n**Client:** {client}\n**Assigned To:** {assigned_to}"}]
@@ -1559,8 +1559,7 @@ def handle_card_callback(body):
         assigned_to = action_value.get("assigned_to", "")
         description = action_value.get("description", "")
         # Route confirmation to the project manager's channel.
-        # Chen folds into Hannah until Chen has his own open_id/channel.
-        if assigned_to in ("Hannah", "Chen"):
+        if assigned_to == "Hannah":
             target_chat = LARK_CHAT_ID_HANNAH
         elif assigned_to == "Lucy":
             target_chat = LARK_CHAT_ID_LUCY
