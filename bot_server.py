@@ -638,16 +638,16 @@ def _fetch_bot_open_id():
 # FEATURE 1 - NOTIFY CARD -> Founders Channel
 # =========================================================================
 def build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key=""):
-    color = "orange" if assigned_to == "Hannah" else "red"
+    color = "orange" if assigned_to in ("Hannah", "Chen") else "red"
     link = record_link(table_id, record_id)
-    action_id = f"notify_viewed_{table_id}_{record_id}"
+    action_id = f"mark_resolved_{table_id}_{record_id}"
     elements = [{"tag": "markdown", "content": f"**Sales Order:** {order_num}\n**Client:** {client}\n**Assigned To:** {assigned_to}"}]
     if image_key:
         elements.append({"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
     if _is_action_clicked(action_id):
-        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Viewed \u2713"}, "type": "default", "disabled": True}]})
+        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}]})
     else:
-        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "\ud83d\udc41 Mark as Viewed"}, "type": "primary", "value": {"action": action_id}}]})
+        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "table_id": table_id, "record_id": record_id, "assigned_to": assigned_to, "image_key": image_key}}]})
     elements.append({"tag": "markdown", "content": f"[Open Record]({link})"})
     return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": f"\ud83d\udce2 Notify: {order_num} - {client}"}, "template": color}, "elements": elements}
 
@@ -1558,7 +1558,14 @@ def handle_card_callback(body):
         rid = action_value.get("record_id", "")
         assigned_to = action_value.get("assigned_to", "")
         description = action_value.get("description", "")
-        target_chat = LARK_CHAT_ID_HANNAH if assigned_to == "Hannah" else (LARK_CHAT_ID_LUCY if assigned_to == "Lucy" else FOUNDERS_CHAT)
+        # Route confirmation to the project manager's channel.
+        # Chen folds into Hannah until Chen has his own open_id/channel.
+        if assigned_to in ("Hannah", "Chen"):
+            target_chat = LARK_CHAT_ID_HANNAH
+        elif assigned_to == "Lucy":
+            target_chat = LARK_CHAT_ID_LUCY
+        else:
+            target_chat = FOUNDERS_CHAT
         if target_chat:
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
