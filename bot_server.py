@@ -643,12 +643,13 @@ def build_notify_card(order_num, client, assigned_to, table_id, record_id, image
     action_id = f"mark_resolved_{table_id}_{record_id}"
     elements = [{"tag": "markdown", "content": f"**Sales Order:** {order_num}\n**Client:** {client}\n**Assigned To:** {assigned_to}"}]
     if image_key:
-        elements.append({"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
+        elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
+    open_record_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Open Record"}, "type": "default", "url": link}
     if _is_action_clicked(action_id):
-        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}]})
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "table_id": table_id, "record_id": record_id, "assigned_to": assigned_to, "image_key": image_key}}]})
-    elements.append({"tag": "markdown", "content": f"[Open Record]({link})"})
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "table_id": table_id, "record_id": record_id, "assigned_to": assigned_to, "image_key": image_key}}
+    elements.append({"tag": "action", "actions": [resolve_btn, open_record_btn]})
     return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": f"\ud83d\udce2 Notify: {order_num} - {client}"}, "template": color}, "elements": elements}
 
 
@@ -691,9 +692,8 @@ def build_approval_card(order_num, assigned_to, table_id, record_id, table_name=
 
     elements = []
     if image_key and not resolved:
-        elements.append({"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
-    elements.append({"tag": "markdown", "content": f"Brendan,\n\n{submitter} has submitted a request for **{order_num}** to review regarding production. Please reply in the card comments."})
-
+        elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
+    elements.append({"tag": "markdown", "content": f"Brendan,\n\n{submitter} has submitted a request for **{order_num}** to review regarding production. Please reply in the card comments."})    view_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}
     view_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}
 
     if _is_action_clicked(action_id):
