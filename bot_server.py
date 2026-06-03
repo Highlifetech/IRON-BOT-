@@ -560,6 +560,17 @@ def get_user_name(open_id):
         return open_id[:10] if open_id else "Unknown"
 
 
+CARLO_OPEN_ID = os.environ.get("CARLO_OPEN_ID", "__CARLO_UNSET__")
+
+def _can_resolve(operator_id, operator_name):
+    """Only Brendan or Carlo may permanently resolve a card."""
+    if BRENDAN_OPEN_ID and BRENDAN_OPEN_ID != "__BRENDAN_UNSET__" and operator_id == BRENDAN_OPEN_ID:
+        return True
+    if CARLO_OPEN_ID and CARLO_OPEN_ID != "__CARLO_UNSET__" and operator_id == CARLO_OPEN_ID:
+        return True
+    return operator_name in ("Brendan", "Carlo")
+
+
 def _est_now():
     from zoneinfo import ZoneInfo
     return datetime.now(ZoneInfo("America/New_York"))
@@ -629,14 +640,14 @@ def _fetch_bot_open_id():
 def build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key=""):
     color = "orange" if assigned_to == "Hannah" else "red"
     link = record_link(table_id, record_id)
-    action_id = f"notify_viewed_{table_id}_{record_id}"
+    action_id = f"mark_resolved_{table_id}_{record_id}"
     elements = [{"tag": "markdown", "content": f"**Sales Order:** {order_num}\n**Client:** {client}\n**Assigned To:** {assigned_to}"}]
     if image_key:
         elements.append({"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
     if _is_action_clicked(action_id):
-        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Viewed \u2713"}, "type": "default", "disabled": True}]})
+        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}]})
     else:
-        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "\ud83d\udc41 Mark as Viewed"}, "type": "primary", "value": {"action": action_id}}]})
+        elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "table_id": table_id, "record_id": record_id, "assigned_to": assigned_to, "image_key": image_key}}]})
     elements.append({"tag": "markdown", "content": f"[Open Record]({link})"})
     return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": f"\ud83d\udce2 Notify: {order_num} - {client}"}, "template": color}, "elements": elements}
 
@@ -656,10 +667,10 @@ def handle_notify_button(table_id, record_id):
             assigned_to = get_assigned_from_table("")
         image_key = get_image_key_from_field(fields)
         card = build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key)
-        target = FOUNDERS_CHAT
+        target = URGENT_APPROVALS_CHAT or FOUNDERS_CHAT
         if target:
             lark.send_card(card, chat_id=target)
-            logger.info(f"Notify card sent to Founders Channel for {order_num}")
+            logger.info(f"Notify card sent to Urgent Updates/Approvals for {order_num}")
         return {"status": "ok", "order": order_num}
     except Exception as e:
         logger.error(f"Notify error: {e}")
@@ -688,7 +699,7 @@ def build_approval_card(order_num, assigned_to, table_id, record_id, table_name=
     if _is_action_clicked(action_id):
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id}}
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key}}
 
     elements.append({"tag": "action", "actions": [view_btn, resolve_btn]})
 
@@ -758,7 +769,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
     if _is_action_clicked(action_id):
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id}}
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key}}
 
     elements.append({"tag": "action", "actions": [view_record_btn, resolve_btn]})
 
@@ -1539,18 +1550,32 @@ def handle_card_callback(body):
     if action_str.startswith("mark_resolved_"):
         if _is_action_clicked(action_str):
             return {"toast": {"type": "info", "content": "Already resolved"}}
+        if not _can_resolve(operator_id, operator_name):
+            return {"toast": {"type": "error", "content": "Only Brendan or Carlo can resolve this."}}
         _mark_action_clicked(action_str, operator_name)
         order_num = action_value.get("order_num", "")
         tid = action_value.get("table_id", "")
         rid = action_value.get("record_id", "")
         assigned_to = action_value.get("assigned_to", "")
         description = action_value.get("description", "")
-        if FOUNDERS_CHAT:
+        # Route confirmation to the project manager's channel.
+        if assigned_to == "Hannah":
+            target_chat = LARK_CHAT_ID_HANNAH
+        elif assigned_to == "Lucy":
+            target_chat = LARK_CHAT_ID_LUCY
+        else:
+            target_chat = FOUNDERS_CHAT
+        if target_chat:
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
-            order_display = f"[{order_num}]({link})" if link else f"**{order_num}**"
-            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Resolved"}, "template": "green"}, "elements": [{"tag": "markdown", "content": f"**{operator_name}** marked {order_display} as resolved \u2014 {now_str}"}]}
-            lark.send_card(confirm_card, chat_id=FOUNDERS_CHAT)
+            confirm_image_key = action_value.get("image_key", "")
+            confirm_elements = [{"tag": "markdown", "content": f"The updated regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
+            if confirm_image_key:
+                confirm_elements.append({"tag": "img", "img_key": confirm_image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
+            if link:
+                confirm_elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}]})
+            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Resolved"}, "template": "green"}, "elements": confirm_elements}
+            lark.send_card(confirm_card, chat_id=target_chat)
         try:
             image_key = action_value.get("image_key", "")
             updated_card = build_update_team_card(order_num, description, assigned_to, tid, rid, "", image_key)
@@ -1585,17 +1610,25 @@ def handle_card_callback(body):
     if action_str.startswith("approval_resolved_"):
         if _is_action_clicked(action_str):
             return {"toast": {"type": "info", "content": "Already resolved"}}
+        if not _can_resolve(operator_id, operator_name):
+            return {"toast": {"type": "error", "content": "Only Brendan or Carlo can resolve this."}}
         _mark_action_clicked(action_str, operator_name)
         order_num = action_value.get("order_num", "")
         tid = action_value.get("table_id", "")
         rid = action_value.get("record_id", "")
         assigned_to = action_value.get("assigned_to", "")
-        if FOUNDERS_CHAT:
+        target_chat = LARK_CHAT_ID_HANNAH if assigned_to == "Hannah" else (LARK_CHAT_ID_LUCY if assigned_to == "Lucy" else FOUNDERS_CHAT)
+        if target_chat:
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
-            order_display = f"[{order_num}]({link})" if link else f"**{order_num}**"
-            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Approval Resolved"}, "template": "green"}, "elements": [{"tag": "markdown", "content": f"**{operator_name}** resolved the approval request for {order_display} \u2014 {now_str}"}]}
-            lark.send_card(confirm_card, chat_id=FOUNDERS_CHAT)
+            confirm_image_key = action_value.get("image_key", "")
+            confirm_elements = [{"tag": "markdown", "content": f"The updated regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
+            if confirm_image_key:
+                confirm_elements.append({"tag": "img", "img_key": confirm_image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
+            if link:
+                confirm_elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}]})
+            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Resolved"}, "template": "green"}, "elements": confirm_elements}
+            lark.send_card(confirm_card, chat_id=target_chat)
         try:
             image_key = action_value.get("image_key", "")
             table_name = action_value.get("table_name", "")
