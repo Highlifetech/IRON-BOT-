@@ -1576,7 +1576,7 @@ def handle_card_callback(body):
                 confirm_elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}]})
             confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Resolved"}, "template": "green"}, "elements": confirm_elements}
             [lark.send_card(confirm_card, chat_id=_c) for _c in dict.fromkeys([x for x in [FOUNDERS_CHAT, {"Hannah": LARK_CHAT_ID_HANNAH, "Lucy": LARK_CHAT_ID_LUCY, "Chen": LARK_CHAT_ID_HANNAH, "Carlo": LARK_CHAT_ID_HLT_CARLO}.get(action_value.get("requested_by", "")), (LARK_CHAT_ID_HLT_CARLO if action_value.get("requested_by", "") == "Carlo" else "")] if x])]        try:
-            try:
+        try:
             image_key = action_value.get("image_key", "")
             updated_card = build_update_team_card(order_num, description, assigned_to, tid, rid, "", image_key)
             return {"toast": {"type": "success", "content": f"Resolved by {operator_name}"}, "card": updated_card}
