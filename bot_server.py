@@ -568,7 +568,7 @@ def _can_resolve(operator_id, operator_name):
         return True
     if CARLO_OPEN_ID and CARLO_OPEN_ID != "__CARLO_UNSET__" and operator_id == CARLO_OPEN_ID:
         return True
-    return operator_name in ("Brendan", "Carlo")
+    return operator_name in ("Brendan", "Carlo", "Hannah", "Chen", "Lucy")
 
 
 def _est_now():
@@ -699,7 +699,7 @@ def build_approval_card(order_num, assigned_to, table_id, record_id, table_name=
     if _is_action_clicked(action_id):
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key}}
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key, "description": description, "requested_by": requested_by}}
 
     elements.append({"tag": "action", "actions": [view_btn, resolve_btn]})
 
@@ -750,7 +750,7 @@ def handle_review_button(table_id, record_id):
 # =========================================================================
 # FEATURE 2 - UPDATE TEAM CARD -> Hannah/Lucy channels (Purple)
 # =========================================================================
-def build_update_team_card(order_num, description, assigned_to, table_id, record_id, table_name="", image_key=""):
+def build_update_team_card(order_num, description, assigned_to, table_id, record_id, table_name="", image_key="", requested_by=""):
     """Project Update Request card — matches the purple card style sent to Hannah/Lucy.
     Includes View Record + Mark Resolved buttons."""
     link = record_link(table_id, record_id)
@@ -769,7 +769,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
     if _is_action_clicked(action_id):
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key}}
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key, "description": description, "requested_by": requested_by}}
 
     elements.append({"tag": "action", "actions": [view_record_btn, resolve_btn]})
 
@@ -778,7 +778,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "purple"},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
         "elements": elements,
     }
 
@@ -788,7 +788,7 @@ def handle_update_team_button(table_id, record_id):
         fields = record.get("fields", {})
         order_num = get_order_num(fields)
         description = field_to_text(fields.get(FIELD_DESCRIPTION, ""))
-        assigned_to = get_assigned_to(fields)
+        assigned_to = get_project_manager(fields) or get_assigned_to(fields)        
         table_name = ""
         if assigned_to == "Brendan":
             tables = lark.get_all_tables()
@@ -849,7 +849,7 @@ def build_project_update_request_card(order_num, assigned_to, table_id, record_i
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "purple"},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
         "elements": elements,
     }
 
@@ -1569,14 +1569,14 @@ def handle_card_callback(body):
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
             confirm_image_key = action_value.get("image_key", "")
-            confirm_elements = [{"tag": "markdown", "content": f"The updated regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
+            confirm_elements = [{"tag": "markdown", "content": f"{operator_name} has reviewed the update request for [{order_num}] and it is resolved \u2014 {now_str}"}]
             if confirm_image_key:
                 confirm_elements.append({"tag": "img", "img_key": confirm_image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
             if link:
                 confirm_elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}]})
             confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Resolved"}, "template": "green"}, "elements": confirm_elements}
-            lark.send_card(confirm_card, chat_id=target_chat)
-        try:
+            [lark.send_card(confirm_card, chat_id=_c) for _c in dict.fromkeys([x for x in [FOUNDERS_CHAT, {"Hannah": LARK_CHAT_ID_HANNAH, "Lucy": LARK_CHAT_ID_LUCY, "Chen": LARK_CHAT_ID_HANNAH, "Carlo": LARK_CHAT_ID_HLT_CARLO}.get(action_value.get("requested_by", "")), (LARK_CHAT_ID_HLT_CARLO if action_value.get("requested_by", "") == "Carlo" else "")] if x])]        try:
+            try:
             image_key = action_value.get("image_key", "")
             updated_card = build_update_team_card(order_num, description, assigned_to, tid, rid, "", image_key)
             return {"toast": {"type": "success", "content": f"Resolved by {operator_name}"}, "card": updated_card}
@@ -1622,7 +1622,7 @@ def handle_card_callback(body):
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
             confirm_image_key = action_value.get("image_key", "")
-            confirm_elements = [{"tag": "markdown", "content": f"The updated regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
+            confirm_elements = [{"tag": "markdown", "content": f"{operator_name} has reviewed the update request for [{order_num}] and it is resolved \u2014 {now_str}"}]
             if confirm_image_key:
                 confirm_elements.append({"tag": "img", "img_key": confirm_image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
             if link:
@@ -1895,7 +1895,7 @@ def _handle_incoming_card(msg, sender):
 
     ironbot_card = {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "purple"},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
         "elements": [
             {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
             {"tag": "action", "actions": [view_record_btn, resolve_btn]},
@@ -2019,7 +2019,7 @@ def _poll_update_request_cards():
 
             ironbot_card = {
                 "config": {"wide_screen_mode": True},
-                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "purple"},
+                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
                 "elements": [
                     {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
                     {"tag": "action", "actions": [view_record_btn, resolve_btn]},
