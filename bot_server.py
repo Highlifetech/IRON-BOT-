@@ -693,7 +693,7 @@ def build_approval_card(order_num, assigned_to, table_id, record_id, table_name=
     elements = []
     if image_key and not resolved:
         elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
-    elements.append({"tag": "markdown", "content": f"Brendan,\n\n{submitter} has submitted a request for **{order_num}** to review regarding production. Please reply in the card comments."})    view_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}
+    elements.append({"tag": "markdown", "content": f"Brendan,\n\n{submitter} has submitted a request for **{order_num}** to review regarding production. Please reply in the card comments."})
     view_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}
 
     if _is_action_clicked(action_id):
