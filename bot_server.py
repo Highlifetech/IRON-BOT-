@@ -822,7 +822,7 @@ def handle_update_team_button(table_id, record_id):
 # FEATURE 2B - PROJECT UPDATE REQUEST CARD -> Hannah/Lucy with Mark Resolved
 # =========================================================================
 
-def build_project_update_request_card(order_num, assigned_to, table_id, record_id, table_name="", image_key=""):
+def build_project_update_request_card(order_num, assigned_to, table_id, record_id, table_name="", image_key="", description="", requested_by=""):
     """Card asking team member to provide an update, with a Mark Resolved button."""
     link = record_link(table_id, record_id)
     action_id = f"project_update_resolved_{table_id}_{record_id}"
@@ -833,14 +833,15 @@ def build_project_update_request_card(order_num, assigned_to, table_id, record_i
     elements = []
     if image_key and not resolved:
         elements.append({"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
-    elements.append({"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."})
+    desc_part = f" Details: {description}." if description else ""
+    elements.append({"tag": "markdown", "content": f"Hello {names}, an update has been requested on the status of order **{order_num}**.{desc_part} Please provide an update in the project comments."})
 
     view_record_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}
 
     if _is_action_clicked(action_id):
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id}}
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "table_name": table_name, "image_key": image_key, "description": description, "requested_by": requested_by}}
 
     elements.append({"tag": "action", "actions": [view_record_btn, resolve_btn]})
 
@@ -854,7 +855,7 @@ def build_project_update_request_card(order_num, assigned_to, table_id, record_i
     }
 
 
-def handle_request_update_button(table_id, record_id):
+def handle_request_update_button(table_id, record_id, requested_by=""):
     """Send a Project Update Request card to the assigned person's channel."""
     try:
         record = lark.get_record(table_id, record_id)
@@ -883,7 +884,8 @@ def handle_request_update_button(table_id, record_id):
             pass
 
         image_key = get_image_key_from_field(fields)
-        card = build_project_update_request_card(order_num, assigned_to, table_id, record_id, table_name, image_key)
+        description = field_to_text(fields.get(FIELD_DESCRIPTION, ""))
+        card = build_project_update_request_card(order_num, assigned_to, table_id, record_id, table_name, image_key, description, requested_by)
 
         target = _route_card_target(table_name, assigned_to)
 
@@ -1569,7 +1571,7 @@ def handle_card_callback(body):
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
             confirm_image_key = action_value.get("image_key", "")
-            confirm_elements = [{"tag": "markdown", "content": f"{operator_name} has reviewed the update request for [{order_num}] and it is resolved \u2014 {now_str}"}]
+            confirm_elements = [{"tag": "markdown", "content": f"The update regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
             if confirm_image_key:
                 confirm_elements.append({"tag": "img", "img_key": confirm_image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
             if link:
@@ -1592,12 +1594,17 @@ def handle_card_callback(body):
         assigned_to = action_value.get("assigned_to", "")
         tid = action_value.get("table_id", "")
         rid = action_value.get("record_id", "")
+        requested_by = action_value.get("requested_by", "")
         if FOUNDERS_CHAT:
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
             order_display = f"[{order_num}]({link})" if link else f"**{order_num}**"
-            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Update Request Resolved"}, "template": "green"}, "elements": [{"tag": "markdown", "content": f"**{operator_name}** resolved the update request for {order_display} \u2014 {now_str}"}]}
-            lark.send_card(confirm_card, chat_id=FOUNDERS_CHAT)
+            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Update Request Resolved"}, "template": "green"}, "elements": [{"tag": "markdown", "content": f"**{operator_name}** updated the status for {order_display} \u2014 {now_str}"}]}
+            _targets = [FOUNDERS_CHAT]
+            if requested_by == "Carlo" and LARK_CHAT_ID_HLT_CARLO:
+                _targets.append(LARK_CHAT_ID_HLT_CARLO)
+            for _c in dict.fromkeys([x for x in _targets if x]):
+                lark.send_card(confirm_card, chat_id=_c)
         try:
             image_key = action_value.get("image_key", "")
             table_name = action_value.get("table_name", "")
@@ -2103,7 +2110,9 @@ def update_team_endpoint(table_id, record_id):
 
 @app.route("/request-update/<table_id>/<record_id>", methods=["POST", "GET"])
 def request_update_endpoint(table_id, record_id):
-    return jsonify(handle_request_update_button(table_id, record_id))
+    body = request.get_json(silent=True) or {}
+    requested_by = body.get("requested_by", "")
+    return jsonify(handle_request_update_button(table_id, record_id, requested_by))
 
 @app.route("/review/<table_id>/<record_id>", methods=["POST", "GET"])
 def review_endpoint(table_id, record_id):
