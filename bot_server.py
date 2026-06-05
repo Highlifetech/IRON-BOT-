@@ -1571,7 +1571,8 @@ def handle_card_callback(body):
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
             confirm_image_key = action_value.get("image_key", "")
-            confirm_elements = [{"tag": "markdown", "content": f"The update regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
+            recipient_name = assigned_to if assigned_to in ("Hannah", "Lucy", "Chen") else "Team"
+            confirm_elements = [{"tag": "markdown", "content": f"Hello {recipient_name}, the update regarding project [{order_num}] has been resolved by {operator_name} \u2014 {now_str}"}]
             if confirm_image_key:
                 confirm_elements.append({"tag": "img", "img_key": confirm_image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
             if link:
@@ -1599,7 +1600,8 @@ def handle_card_callback(body):
             now_str = _est_now().strftime("%I:%M %p ET, %b %d")
             link = record_link(tid, rid) if tid and rid else ""
             order_display = f"[{order_num}]({link})" if link else f"**{order_num}**"
-            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Update Request Resolved"}, "template": "green"}, "elements": [{"tag": "markdown", "content": f"**{operator_name}** updated the status for {order_display} \u2014 {now_str}"}]}
+            recipient_name = "Carlo" if requested_by == "Carlo" else "Team"
+            confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "\u2705 Update Request Resolved"}, "template": "green"}, "elements": [{"tag": "markdown", "content": f"Hello {recipient_name}, {operator_name} updated the status for {order_display} \u2014 {now_str}"}]}
             _targets = [FOUNDERS_CHAT]
             if requested_by == "Carlo" and LARK_CHAT_ID_HLT_CARLO:
                 _targets.append(LARK_CHAT_ID_HLT_CARLO)
