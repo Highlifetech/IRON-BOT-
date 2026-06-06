@@ -638,7 +638,7 @@ def _fetch_bot_open_id():
 # FEATURE 1 - NOTIFY CARD -> Founders Channel
 # =========================================================================
 def build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key=""):
-    color = "orange" if assigned_to == "Hannah" else "red"
+    color = "red"  # Feature 1: Notify always red
     link = record_link(table_id, record_id)
     action_id = f"mark_resolved_{table_id}_{record_id}"
     elements = [{"tag": "markdown", "content": f"**Sales Order:** {order_num}\n**Client:** {client}\n**Assigned To:** {assigned_to}"}]
@@ -778,7 +778,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "blue"  # Feature 2: Update Team always blue},
         "elements": elements,
     }
 
@@ -850,7 +850,7 @@ def build_project_update_request_card(order_num, assigned_to, table_id, record_i
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"  # Feature 3: Request always orange},
         "elements": elements,
     }
 
@@ -1904,7 +1904,7 @@ def _handle_incoming_card(msg, sender):
 
     ironbot_card = {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"  # Feature 3: Request always orange},
         "elements": [
             {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
             {"tag": "action", "actions": [view_record_btn, resolve_btn]},
@@ -2028,7 +2028,7 @@ def _poll_update_request_cards():
 
             ironbot_card = {
                 "config": {"wide_screen_mode": True},
-                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": ("blue" if assigned_to == "Chen" else "orange" if assigned_to == "Lucy" else "red")},
+                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"  # Feature 3: Request always orange},
                 "elements": [
                     {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
                     {"tag": "action", "actions": [view_record_btn, resolve_btn]},
