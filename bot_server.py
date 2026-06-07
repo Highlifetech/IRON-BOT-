@@ -394,7 +394,7 @@ def _route_card_target(table_name, assigned_to):
         return MASTER_CHAT or FOUNDERS_CHAT
     if any(lc in tname for lc in LARGE_CLIENT_TABLES):
         return MASTER_CHAT or FOUNDERS_CHAT
-        # Default: Master Production (was Lucy — that was the bug)
+        # Default: Master Production (was Lucy â that was the bug)
     return MASTER_CHAT or FOUNDERS_CHAT
 
 
@@ -751,7 +751,7 @@ def handle_review_button(table_id, record_id):
 # FEATURE 2 - UPDATE TEAM CARD -> Hannah/Lucy channels (Purple)
 # =========================================================================
 def build_update_team_card(order_num, description, assigned_to, table_id, record_id, table_name="", image_key="", requested_by=""):
-    """Project Update Request card — matches the purple card style sent to Hannah/Lucy.
+    """Project Update Request card â matches the purple card style sent to Hannah/Lucy.
     Includes View Record + Mark Resolved buttons."""
     link = record_link(table_id, record_id)
     action_id = f"mark_resolved_{table_id}_{record_id}"
@@ -778,7 +778,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "blue"  # Feature 2: Update Team always blue},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "blue"},  # Feature 2: Update Team always blue
         "elements": elements,
     }
 
@@ -850,7 +850,7 @@ def build_project_update_request_card(order_num, assigned_to, table_id, record_i
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"  # Feature 3: Request always orange},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"},  # Feature 3: Request always orange
         "elements": elements,
     }
 
@@ -1098,7 +1098,7 @@ def _build_alert_card(entries, window, assigned):
     return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": f"\u26a0\ufe0f {title} \u2014 {assigned}"}, "template": color}, "elements": elements}
 
 # =========================================================================
-# FEATURE 5 - MESSAGE SUMMARIES (Overnight + Afternoon) — ALL CHANNELS
+# FEATURE 5 - MESSAGE SUMMARIES (Overnight + Afternoon) â ALL CHANNELS
 # =========================================================================
 
 # All channels to scan for message summaries (label -> chat_id)
@@ -1217,7 +1217,7 @@ def _summarize_messages_with_ai(all_channel_msgs, period_label, projects_context
 
 {f"Current project status: {projects_context}" if projects_context else ""}
 
-Summarize these messages for Brendan (the founder). Be concise but informative — focus on project status, key decisions, and what needs attention. Keep each topic to 1-2 sentences max.
+Summarize these messages for Brendan (the founder). Be concise but informative â focus on project status, key decisions, and what needs attention. Keep each topic to 1-2 sentences max.
 
 Organize by PERSON in this order: **HANNAH/CHEN**, **LUCY**, **CARLO**, **BRIEANNE**, **OTHERS** (skip any with no messages).
 
@@ -1239,8 +1239,8 @@ RULES:
 - Always attribute who said what when summarizing conversations
 - Keep good spacing between topics (blank line between each)
 - Each person section separated by a divider line
-- For CARLO: summarize ALL Carlo messages (including inbound shipment statuses) as brief paragraph topics like everyone else. Do NOT list individual shipments as bullet points — just summarize the overall inbound status in 2-3 sentences. Example: "**Inbound Shipments** — Carlo reported 10 shipments in various stages. Key items: Cal Jewellery refused by importer, 7 Brew DHL delivered early, several others in transit to NJ/GA/NV."
-- "Brieanne Design" channel messages go under the BRIEANNE person section. Do NOT create a separate "DESIGN" section — Brieanne IS the design team. Put all Brieanne Design topics under BRIEANNE.
+- For CARLO: summarize ALL Carlo messages (including inbound shipment statuses) as brief paragraph topics like everyone else. Do NOT list individual shipments as bullet points â just summarize the overall inbound status in 2-3 sentences. Example: "**Inbound Shipments** â Carlo reported 10 shipments in various stages. Key items: Cal Jewellery refused by importer, 7 Brew DHL delivered early, several others in transit to NJ/GA/NV."
+- "Brieanne Design" channel messages go under the BRIEANNE person section. Do NOT create a separate "DESIGN" section â Brieanne IS the design team. Put all Brieanne Design topics under BRIEANNE.
 - The ONLY allowed person headers are: HANNAH, LUCY, CARLO, BRIEANNE, OTHERS. Never create other headers like DESIGN, INBOUND, etc."""
 
     try:
@@ -1349,7 +1349,7 @@ RULES:
             emoji = "\U0001f319" if "Overnight" in period_label else ("\u2600\ufe0f" if "Afternoon" in period_label or "Midday" in period_label else "\U0001f307")
             card = {
                 "config": {"wide_screen_mode": True},
-                "header": {"title": {"tag": "plain_text", "content": f"{emoji} {person_label} Update — {period_label}"}, "template": "blue" if person == "Hannah" else "purple"},
+                "header": {"title": {"tag": "plain_text", "content": f"{emoji} {person_label} Update â {period_label}"}, "template": "blue" if person == "Hannah" else "purple"},
                 "elements": [
                     {"tag": "markdown", "content": summary_text},
                 ],
@@ -1539,7 +1539,7 @@ def handle_card_callback(body):
     operator_name = get_user_name(operator_id)
     logger.info(f"Card callback: {action_str} by {operator_name} | operator={operator} | operator_id='{operator_id}'")
     if operator_name == "Unknown":
-        logger.warning(f"Card callback UNKNOWN operator — full body keys: {list(body.keys())} | body={body}")
+        logger.warning(f"Card callback UNKNOWN operator â full body keys: {list(body.keys())} | body={body}")
     if not action_str:
         return {"toast": {"type": "info", "content": "No action"}}
 
@@ -1904,7 +1904,7 @@ def _handle_incoming_card(msg, sender):
 
     ironbot_card = {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"  # Feature 3: Request always orange},
+        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"},  # Feature 3: Request always orange
         "elements": [
             {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
             {"tag": "action", "actions": [view_record_btn, resolve_btn]},
@@ -2028,7 +2028,7 @@ def _poll_update_request_cards():
 
             ironbot_card = {
                 "config": {"wide_screen_mode": True},
-                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"  # Feature 3: Request always orange},
+                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"},  # Feature 3: Request always orange
                 "elements": [
                     {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
                     {"tag": "action", "actions": [view_record_btn, resolve_btn]},
@@ -2326,7 +2326,7 @@ def diag_google():
 
 
 # =========================================================================
-# STARTUP — guarded to prevent double-init
+# STARTUP â guarded to prevent double-init
 # =========================================================================
 
 def _scheduled_google_morning_briefing():
