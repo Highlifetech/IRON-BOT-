@@ -642,8 +642,7 @@ def build_notify_card(order_num, client, assigned_to, table_id, record_id, image
     link = record_link(table_id, record_id)
     action_id = f"mark_resolved_{table_id}_{record_id}"
     requester = requested_by or "A team member"
-    desc_part = f"\n\n**Messages:**\n{description}" if description else ""
-    elements = [{"tag": "markdown", "content": f"Hello Brendan,\n\n{requester} has requested your attention for **{order_num}** ({client}).{desc_part}"}]
+    elements = [{"tag": "markdown", "content": f"Hello Brendan,\n\n{requester} has requested your attention for **{order_num}** ({client})."}]
     if image_key:
         elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
     open_record_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Open Record"}, "type": "default", "url": link}
@@ -765,7 +764,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
     elements = []
     if image_key and not resolved:
         elements.append({"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
-    elements.append({"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."})
+    elements.append({"tag": "markdown", "content": f"Hello {names},\n\nAn update has been made on sales order **{order_num}**."})
 
     view_record_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "View Record"}, "type": "default", "url": link}
 
