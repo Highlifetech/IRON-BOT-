@@ -637,11 +637,13 @@ def _fetch_bot_open_id():
 # =========================================================================
 # FEATURE 1 - NOTIFY CARD -> Founders Channel
 # =========================================================================
-def build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key=""):
-    color = "red"  # Feature 1: Notify always red
+def build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key="", description="", requested_by=""):
+    color = "blue"  # Review Required cards are blue
     link = record_link(table_id, record_id)
     action_id = f"mark_resolved_{table_id}_{record_id}"
-    elements = [{"tag": "markdown", "content": f"**Sales Order:** {order_num}\n**Client:** {client}\n**Assigned To:** {assigned_to}"}]
+    requester = requested_by or "A team member"
+    desc_part = f"\n\n**Messages:**\n{description}" if description else ""
+    elements = [{"tag": "markdown", "content": f"Hello Brendan,\n\n{requester} has requested your attention for **{order_num}** ({client}).{desc_part}"}]
     if image_key:
         elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Production Artwork"}})
     open_record_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Open Record"}, "type": "default", "url": link}
@@ -650,10 +652,10 @@ def build_notify_card(order_num, client, assigned_to, table_id, record_id, image
     else:
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "table_id": table_id, "record_id": record_id, "assigned_to": assigned_to, "image_key": image_key}}
     elements.append({"tag": "action", "actions": [resolve_btn, open_record_btn]})
-    return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": f"\ud83d\udce2 Notify: {order_num} - {client}"}, "template": color}, "elements": elements}
+    return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": "Review Required"}, "template": color}, "elements": elements}
 
 
-def handle_notify_button(table_id, record_id):
+def handle_notify_button(table_id, record_id, requested_by=""):
     try:
         record = lark.get_record(table_id, record_id)
         fields = record.get("fields", {})
@@ -667,7 +669,8 @@ def handle_notify_button(table_id, record_id):
         if assigned_to == "Brendan":
             assigned_to = get_assigned_from_table("")
         image_key = get_image_key_from_field(fields)
-        card = build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key)
+        description = field_to_text(fields.get(FIELD_DESCRIPTION, ""))
+        card = build_notify_card(order_num, client, assigned_to, table_id, record_id, image_key, description, requested_by)
         target = URGENT_APPROVALS_CHAT or FOUNDERS_CHAT
         if target:
             lark.send_card(card, chat_id=target)
@@ -699,7 +702,7 @@ def build_approval_card(order_num, assigned_to, table_id, record_id, table_name=
     if _is_action_clicked(action_id):
         resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Resolved \u2713"}, "type": "default", "disabled": True}
     else:
-        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key, "description": description, "requested_by": requested_by}}
+        resolve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Mark Resolved"}, "type": "primary", "value": {"action": action_id, "order_num": order_num, "assigned_to": assigned_to, "table_id": table_id, "record_id": record_id, "image_key": image_key}}
 
     elements.append({"tag": "action", "actions": [view_btn, resolve_btn]})
 
@@ -778,7 +781,7 @@ def build_update_team_card(order_num, description, assigned_to, table_id, record
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "blue"},  # Feature 2: Update Team always blue
+        "header": {"title": {"tag": "plain_text", "content": "Project Update"}, "template": "purple"},  # Update Team: purple, Project Update
         "elements": elements,
     }
 
@@ -850,7 +853,7 @@ def build_project_update_request_card(order_num, assigned_to, table_id, record_i
 
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"},  # Feature 3: Request always orange
+        "header": {"title": {"tag": "plain_text", "content": "Status Request"}, "template": "orange"},  # Request: orange, Status Request
         "elements": elements,
     }
 
@@ -1904,7 +1907,7 @@ def _handle_incoming_card(msg, sender):
 
     ironbot_card = {
         "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"},  # Feature 3: Request always orange
+        "header": {"title": {"tag": "plain_text", "content": "Status Request"}, "template": "orange"},  # Request: orange, Status Request
         "elements": [
             {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
             {"tag": "action", "actions": [view_record_btn, resolve_btn]},
@@ -2028,7 +2031,7 @@ def _poll_update_request_cards():
 
             ironbot_card = {
                 "config": {"wide_screen_mode": True},
-                "header": {"title": {"tag": "plain_text", "content": "Project Update Request"}, "template": "orange"},  # Feature 3: Request always orange
+                "header": {"title": {"tag": "plain_text", "content": "Status Request"}, "template": "orange"},  # Request: orange, Status Request
                 "elements": [
                     {"tag": "markdown", "content": f"Hello {names},\n\nAn update has been requested on the status of order **{order_num}**. Please provide an update in the project comments."},
                     {"tag": "action", "actions": [view_record_btn, resolve_btn]},
@@ -2103,7 +2106,9 @@ def card_callback():
 
 @app.route("/notify/<table_id>/<record_id>", methods=["POST", "GET"])
 def notify_endpoint(table_id, record_id):
-    return jsonify(handle_notify_button(table_id, record_id))
+    body = request.get_json(silent=True) or {}
+    requested_by = body.get("requested_by", "")
+    return jsonify(handle_notify_button(table_id, record_id, requested_by))
 
 
 @app.route("/update-team/<table_id>/<record_id>", methods=["POST", "GET"])
