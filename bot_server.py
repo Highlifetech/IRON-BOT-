@@ -2108,22 +2108,26 @@ def card_callback():
 def notify_endpoint(table_id, record_id):
     body = request.get_json(silent=True) or {}
     requested_by = body.get("requested_by", "")
-    return jsonify(handle_notify_button(table_id, record_id, requested_by))
+    threading.Thread(target=handle_notify_button, args=(table_id, record_id, requested_by), daemon=True).start()
+    return jsonify({"status": "accepted"})
 
 
 @app.route("/update-team/<table_id>/<record_id>", methods=["POST", "GET"])
 def update_team_endpoint(table_id, record_id):
-    return jsonify(handle_update_team_button(table_id, record_id))
+    threading.Thread(target=handle_update_team_button, args=(table_id, record_id), daemon=True).start()
+    return jsonify({"status": "accepted"})
 
 @app.route("/request-update/<table_id>/<record_id>", methods=["POST", "GET"])
 def request_update_endpoint(table_id, record_id):
     body = request.get_json(silent=True) or {}
     requested_by = body.get("requested_by", "")
-    return jsonify(handle_request_update_button(table_id, record_id, requested_by))
+    threading.Thread(target=handle_request_update_button, args=(table_id, record_id, requested_by), daemon=True).start()
+    return jsonify({"status": "accepted"})
 
 @app.route("/review/<table_id>/<record_id>", methods=["POST", "GET"])
 def review_endpoint(table_id, record_id):
-    return jsonify(handle_review_button(table_id, record_id))
+    threading.Thread(target=handle_review_button, args=(table_id, record_id), daemon=True).start()
+    return jsonify({"status": "accepted"})
 
 
 @app.route("/morning-digest", methods=["POST", "GET"])
