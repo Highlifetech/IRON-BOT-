@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 import anthropic
+import iron_tools
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
@@ -1741,18 +1742,82 @@ def build_context(projects):
     return "\n".join(lines)
 
 
+# In-memory store of write actions awaiting user confirmation, keyed by chat_id.
+pending_actions = {}
+
+
+def _handle_tool_call(name, args, chat_id):
+    """Run read tools immediately; gate write tools behind confirmation."""
+    if name in iron_tools.READ_TOOLS:
+        return iron_tools.execute_tool(lark, name, args)
+    if name in iron_tools.WRITE_TOOLS:
+        pending_actions[chat_id] = {"name": name, "args": args}
+        return {
+            "status": "confirmation_required",
+            "summary": iron_tools.describe_action(name, args),
+            "note": "Tell the user what you will do and ask them to reply 'confirm' to proceed. Do not call this tool again.",
+        }
+    return {"error": f"Unknown tool '{name}'."}
+
+
 def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
     try:
+        # --- Confirmation path: a write action is pending for this chat ---
+        pend = pending_actions.get(chat_id)
+        if pend:
+            if iron_tools.is_confirmation(user_text):
+                out = iron_tools.execute_tool(lark, pend["name"], pend["args"])
+                pending_actions.pop(chat_id, None)
+                msg = ("Done \u2014 " + json.dumps(out)) if "error" not in out else ("Couldn't complete that: " + out["error"])
+                _add_to_conversation(chat_id, "user", user_text)
+                _add_to_conversation(chat_id, "assistant", msg)
+                lark.send_group_message(msg, chat_id=chat_id)
+                return
+            if iron_tools.is_decline(user_text):
+                pending_actions.pop(chat_id, None)
+                lark.send_group_message("Okay, cancelled \u2014 nothing was changed.", chat_id=chat_id)
+                return
+            pending_actions.pop(chat_id, None)
+
         projects = fetch_all_projects()
         if scope != "brendan":
             projects = [p for p in projects if scope in p.get("__table_name__", "").lower()]
         chat_hist = _get_conversation(chat_id)
         _add_to_conversation(chat_id, "user", user_text)
         context = build_context(projects)
-        system_prompt = "You are IRON BOT, HLT internal assistant powered by Claude. Be conversational and proactive. 'Due Date' = 'In Hand Date'. Timestamps are Unix ms."
+        system_prompt = (
+            "You are IRON BOT, HLT internal assistant powered by Claude. Be conversational and proactive. "
+            "'Due Date' = 'In Hand Date'. Timestamps are Unix ms. "
+            "You can take actions using tools. For any write/update tool the system will return "
+            "'confirmation_required' with a summary \u2014 when that happens, clearly tell the user exactly what "
+            "you will do and ask them to reply 'confirm' to proceed; do NOT retry the tool. Use read tools "
+            "freely to look things up. Never invent record_ids, table_ids, or user_ids \u2014 look them up first."
+        )
         user_message = f"--- LARK DATA ---\n{context}\n--- END ---\n\nQuestion: {user_text}"
-        response = anthropic_client.messages.create(model="claude-sonnet-4-6", max_tokens=4096, system=system_prompt, messages=(chat_hist or []) + [{"role": "user", "content": user_message}])
-        answer = response.content[0].text.strip()
+        messages = (chat_hist or []) + [{"role": "user", "content": user_message}]
+
+        answer = None
+        for _ in range(6):
+            response = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=system_prompt,
+                tools=iron_tools.TOOL_SCHEMAS,
+                messages=messages,
+            )
+            if response.stop_reason != "tool_use":
+                answer = "".join(b.text for b in response.content if b.type == "text").strip()
+                break
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for b in response.content:
+                if b.type == "tool_use":
+                    out = _handle_tool_call(b.name, dict(b.input), chat_id)
+                    tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": json.dumps(out)})
+            messages.append({"role": "user", "content": tool_results})
+        if not answer:
+            answer = "I couldn't finish that in a few steps \u2014 could you simplify the request?"
+
         _add_to_conversation(chat_id, "assistant", answer)
         lark.send_group_message(answer, chat_id=chat_id)
     except Exception as e:
