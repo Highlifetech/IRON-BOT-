@@ -266,6 +266,78 @@ def ingest_wiki(lark, store, embedder, seen, stats):
         _ingest_one(store, embedder, "wiki", sid, title, "", page.get("content", ""), seen, stats)
 
 
+def _message_text(m):
+    """Extract plain text from a Lark message (text + post/rich text only)."""
+    mt = m.get("msg_type")
+    raw = (m.get("body") or {}).get("content") or m.get("content")
+    if not raw:
+        return ""
+    try:
+        c = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return ""
+    if mt == "text":
+        return (c.get("text") or "").strip()
+    if mt == "post":
+        # post can be wrapped by locale, e.g. {"en_us": {"title":..,"content":..}}
+        if "content" not in c and "title" not in c:
+            for v in c.values():
+                if isinstance(v, dict) and ("content" in v or "title" in v):
+                    c = v
+                    break
+        out = []
+        if c.get("title"):
+            out.append(c["title"])
+        for line in c.get("content") or []:
+            for node in line:
+                if isinstance(node, dict) and node.get("tag") == "text":
+                    out.append(node.get("text", ""))
+        return " ".join(out).strip()
+    return ""
+
+
+def ingest_messages(lark, store, embedder, seen, stats):
+    """Index history from every GROUP chat the bot is a member of. Private 1:1
+    DMs (chat_mode 'p2p') are skipped unless config.INGEST_DMS is enabled."""
+    try:
+        chats = lark.list_chats()
+    except Exception as e:
+        logger.warning("list_chats failed (IM scope?): %s", str(e)[:160])
+        return
+    for chat in chats:
+        chat_id = chat.get("chat_id")
+        if not chat_id:
+            continue
+        name = chat.get("name") or chat_id
+        mode = chat.get("chat_mode")
+        if mode is None:
+            try:
+                mode = (lark.get_chat_info(chat_id) or {}).get("chat_mode")
+            except Exception:
+                mode = None
+        if mode == "p2p" and not config.INGEST_DMS:
+            stats["dms_skipped"] = stats.get("dms_skipped", 0) + 1
+            continue
+        try:
+            msgs = lark.get_chat_history(chat_id, limit=50) or []
+        except Exception as e:
+            logger.warning("history failed for %s: %s", name, str(e)[:140])
+            continue
+        if config.MAX_MESSAGES_PER_CHAT and len(msgs) > config.MAX_MESSAGES_PER_CHAT:
+            msgs = msgs[-config.MAX_MESSAGES_PER_CHAT:]  # most recent
+        texts = []
+        for m in msgs:
+            t = _message_text(m)
+            if t:
+                texts.append(t)
+        if not texts:
+            continue
+        body = f"Group chat: {name}\n" + "\n".join(texts)
+        _ingest_one(store, embedder, "message", f"chat:{chat_id}",
+                    f"Chat: {name}", "", body, seen, stats)
+        stats["chats_read"] = stats.get("chats_read", 0) + 1
+
+
 def _flatten(val):
     if val is None:
         return ""
@@ -303,6 +375,8 @@ def main():
         ingest_drive_files(lark, store, embedder, seen, stats)
     if config.INGEST_WIKI:
         ingest_wiki(lark, store, embedder, seen, stats)
+    if config.INGEST_MESSAGES:
+        ingest_messages(lark, store, embedder, seen, stats)
 
     removed = store.prune_missing(seen)
     store.set_meta("provider", embedder.name)

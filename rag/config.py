@@ -39,6 +39,11 @@ INGEST_ATTACHMENTS = os.environ.get("RAG_INGEST_ATTACHMENTS", "1") == "1"
 INGEST_DOCS = os.environ.get("RAG_INGEST_DOCS", "1") == "1"
 INGEST_WIKI = os.environ.get("RAG_INGEST_WIKI", "1") == "1"
 INGEST_DRIVE = os.environ.get("RAG_INGEST_DRIVE", "1") == "1"
+INGEST_MESSAGES = os.environ.get("RAG_INGEST_MESSAGES", "1") == "1"
+# Privacy guard: never index 1:1 private DMs unless explicitly turned on.
+INGEST_DMS = os.environ.get("RAG_INGEST_DMS", "0") == "1"
+# Cap messages pulled per chat (most recent N) to bound build time/cost.
+MAX_MESSAGES_PER_CHAT = int(os.environ.get("RAG_MAX_MESSAGES_PER_CHAT", "1500"))
 
 # Skip downloading attachments larger than this (MB) to keep CI fast/cheap.
 MAX_ATTACHMENT_MB = int(os.environ.get("RAG_MAX_ATTACHMENT_MB", "25"))
