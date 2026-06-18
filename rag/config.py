@@ -22,9 +22,10 @@ EMBED_PROVIDER = os.environ.get("RAG_EMBED_PROVIDER", "auto")
 # voyage-3-large is Anthropic's current recommended embeddings model for Claude.
 VOYAGE_MODEL = os.environ.get("RAG_VOYAGE_MODEL", "voyage-3-large")
 OPENAI_EMBED_MODEL = os.environ.get("RAG_OPENAI_MODEL", "text-embedding-3-small")
-EMBED_BATCH = int(os.environ.get("RAG_EMBED_BATCH", "32"))
-# Seconds to pause between embedding requests, to stay under free-tier rate limits.
-EMBED_REQUEST_DELAY = float(os.environ.get("RAG_EMBED_REQUEST_DELAY", "1.0"))
+EMBED_BATCH = int(os.environ.get("RAG_EMBED_BATCH", "128"))
+# Seconds to pause between embedding requests. Small on a paid tier; the
+# backoff in embeddings.py still handles any rate-limit blips.
+EMBED_REQUEST_DELAY = float(os.environ.get("RAG_EMBED_REQUEST_DELAY", "0.1"))
 LOCAL_EMBED_DIM = 256  # only used by the local test stub
 
 # --- Retrieval ---
@@ -45,8 +46,9 @@ INGEST_DMS = os.environ.get("RAG_INGEST_DMS", "0") == "1"
 # Cap messages pulled per chat (most recent N) to bound build time/cost.
 MAX_MESSAGES_PER_CHAT = int(os.environ.get("RAG_MAX_MESSAGES_PER_CHAT", "1500"))
 
-# Skip downloading attachments larger than this (MB) to keep CI fast/cheap.
-MAX_ATTACHMENT_MB = int(os.environ.get("RAG_MAX_ATTACHMENT_MB", "25"))
+# Skip downloading attachments larger than this (MB). Raised to cover large
+# project mockups / tech-pack PDFs.
+MAX_ATTACHMENT_MB = int(os.environ.get("RAG_MAX_ATTACHMENT_MB", "200"))
 
 # Lark tenant domain for building human-readable citation URLs.
 LARK_TENANT_DOMAIN = os.environ.get("LARK_TENANT_DOMAIN", "")  # e.g. "hlt.larksuite.com"
