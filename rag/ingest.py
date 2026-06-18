@@ -220,9 +220,12 @@ def _flatten(val):
     if isinstance(val, (str, int, float)):
         return str(val)
     if isinstance(val, list):
-        return ", ".join(_flatten(x) for x in val)
+        return ", ".join(_flatten(x) for x in val if x is not None)
     if isinstance(val, dict):
-        return val.get("text", val.get("name", json.dumps(val, ensure_ascii=False)))
+        # A field dict may carry {"text": None} etc., so coalesce instead of
+        # using dict.get defaults (which only apply when the key is absent).
+        out = val.get("text") or val.get("name")
+        return str(out) if out else json.dumps(val, ensure_ascii=False)
     return str(val)
 
 
