@@ -22,7 +22,9 @@ EMBED_PROVIDER = os.environ.get("RAG_EMBED_PROVIDER", "auto")
 # voyage-3-large is Anthropic's current recommended embeddings model for Claude.
 VOYAGE_MODEL = os.environ.get("RAG_VOYAGE_MODEL", "voyage-3-large")
 OPENAI_EMBED_MODEL = os.environ.get("RAG_OPENAI_MODEL", "text-embedding-3-small")
-EMBED_BATCH = int(os.environ.get("RAG_EMBED_BATCH", "64"))
+EMBED_BATCH = int(os.environ.get("RAG_EMBED_BATCH", "32"))
+# Seconds to pause between embedding requests, to stay under free-tier rate limits.
+EMBED_REQUEST_DELAY = float(os.environ.get("RAG_EMBED_REQUEST_DELAY", "1.0"))
 LOCAL_EMBED_DIM = 256  # only used by the local test stub
 
 # --- Retrieval ---

@@ -14,12 +14,43 @@ import hashlib
 import logging
 import math
 import os
+import random
+import time
 
 import requests
 
 from . import config
 
 logger = logging.getLogger("rag.embeddings")
+
+# Statuses worth retrying: rate limit + transient server errors.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _post_with_retry(url, headers, payload, timeout=60, max_retries=8):
+    """POST with exponential backoff. Honors Retry-After on 429 so we ride out
+    free-tier rate limits instead of crashing the whole build."""
+    for attempt in range(max_retries + 1):
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code not in _RETRY_STATUS:
+            resp.raise_for_status()
+            return resp
+        if attempt == max_retries:
+            resp.raise_for_status()
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                wait = float(retry_after)
+            except ValueError:
+                wait = 2 ** attempt
+        else:
+            wait = min(60.0, 2 ** attempt) + random.uniform(0, 1)
+        logger.warning(
+            "embeddings HTTP %s -- backing off %.1fs (attempt %d/%d)",
+            resp.status_code, wait, attempt + 1, max_retries,
+        )
+        time.sleep(wait)
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def get_embedder():
@@ -57,14 +88,14 @@ class _VoyageEmbedder(_BaseEmbedder):
 
     def embed(self, texts, input_type="document"):
         out = []
-        for batch in self._batched(texts):
-            resp = requests.post(
+        for i, batch in enumerate(self._batched(texts)):
+            if i:
+                time.sleep(config.EMBED_REQUEST_DELAY)  # stay under free-tier RPM
+            resp = _post_with_retry(
                 "https://api.voyageai.com/v1/embeddings",
                 headers={"Authorization": f"Bearer {self.key}"},
-                json={"model": self.model, "input": batch, "input_type": input_type},
-                timeout=60,
+                payload={"model": self.model, "input": batch, "input_type": input_type},
             )
-            resp.raise_for_status()
             data = sorted(resp.json()["data"], key=lambda d: d["index"])
             out.extend(d["embedding"] for d in data)
         self.dim = len(out[0]) if out else 0
@@ -83,14 +114,14 @@ class _OpenAIEmbedder(_BaseEmbedder):
 
     def embed(self, texts):
         out = []
-        for batch in self._batched(texts):
-            resp = requests.post(
+        for i, batch in enumerate(self._batched(texts)):
+            if i:
+                time.sleep(config.EMBED_REQUEST_DELAY)
+            resp = _post_with_retry(
                 "https://api.openai.com/v1/embeddings",
                 headers={"Authorization": f"Bearer {self.key}"},
-                json={"model": self.model, "input": batch},
-                timeout=60,
+                payload={"model": self.model, "input": batch},
             )
-            resp.raise_for_status()
             data = sorted(resp.json()["data"], key=lambda d: d["index"])
             out.extend(d["embedding"] for d in data)
         self.dim = len(out[0]) if out else 0
