@@ -1,0 +1,8 @@
+# RAG layer dependencies (in addition to the main requirements.txt).
+# PyMuPDF is already in requirements.txt and is reused for PDF text/OCR rendering.
+numpy>=1.26.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+python-pptx>=0.6.23
+pytesseract>=0.3.10     # needs the `tesseract-ocr` system binary (installed in CI)
+Pillow>=10.0.0
