@@ -14,6 +14,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 from lark_client import LarkClient
+from rag import retrieval
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from google_client import get_todays_meetings, get_recent_emails, filter_important_emails
@@ -1784,7 +1785,11 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             projects = [p for p in projects if scope in p.get("__table_name__", "").lower()]
         chat_hist = _get_conversation(chat_id)
         _add_to_conversation(chat_id, "user", user_text)
-        context = build_context(projects)
+        # RAG: retrieve the most relevant doc/record chunks for this question,
+        # plus a small live record snapshot for date/aggregate math.
+        kb = retrieval.format_context(user_text)
+        live = build_context(projects[:40])
+        context = (kb + "\n\n--- LIVE RECORDS (snapshot) ---\n" + live).strip() if kb else live
         system_prompt = (
             "You are IRON BOT, HLT internal assistant powered by Claude. Be conversational and proactive. "
             "'Due Date' = 'In Hand Date'. Timestamps are Unix ms. "
@@ -1799,7 +1804,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         answer = None
         for _ in range(6):
             response = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
+                model="claude-opus-4-8",
                 max_tokens=4096,
                 system=system_prompt,
                 tools=iron_tools.TOOL_SCHEMAS,
@@ -1817,6 +1822,10 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             messages.append({"role": "user", "content": tool_results})
         if not answer:
             answer = "I couldn't finish that in a few steps \u2014 could you simplify the request?"
+
+        foot = retrieval.sources_footer(user_text)
+        if foot:
+            answer = answer + "\n\n" + foot
 
         _add_to_conversation(chat_id, "assistant", answer)
         lark.send_group_message(answer, chat_id=chat_id)
