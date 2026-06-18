@@ -20,6 +20,8 @@ import logging
 import sys
 import time
 
+import requests
+
 from . import chunking, config, document_extract
 from .embeddings import get_embedder
 from .vector_store import VectorStore
@@ -89,7 +91,53 @@ def _ingest_one(store, embedder, source_type, source_id, title, url, text, seen,
     stats["indexed_chunks"] += len(payload)
 
 
+_field_id_cache = {}
+
+
+def _bitable_app_token(lark):
+    import lark_client
+    return getattr(lark_client, "LARK_BASE_APP_TOKEN", None) or os.environ.get("LARK_BASE_APP_TOKEN")
+
+
+def _field_map(lark, app_token, table_id):
+    """Map attachment field NAME -> field_id (needed for the download `extra`)."""
+    if table_id in _field_id_cache:
+        return _field_id_cache[table_id]
+    m = {}
+    try:
+        items = lark._paginate(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
+            items_key="items",
+        )
+        for f in items:
+            fid, fname = f.get("field_id"), f.get("field_name")
+            if fid and fname:
+                m[fname] = fid
+    except Exception as e:
+        logger.warning("field map fetch failed for %s: %s", table_id, str(e)[:120])
+    _field_id_cache[table_id] = m
+    return m
+
+
+def _download_attachment(lark, table_id, field_id, record_id, token):
+    """Download a Base attachment. Bitable attachments require an `extra`
+    permission blob on the medias/download call or Lark returns HTTP 400."""
+    perm = {"tableId": table_id}
+    if field_id and record_id:
+        perm["attachments"] = {field_id: {record_id: [token]}}
+    extra = json.dumps({"bitablePerm": perm})
+    resp = requests.get(
+        f"{lark.base_url}/open-apis/drive/v1/medias/{token}/download",
+        headers=lark._headers(None),
+        params={"extra": extra},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
 def ingest_base_and_attachments(lark, store, embedder, seen, stats):
+    app_token = _bitable_app_token(lark)
     tables = lark.get_all_tables()
     for table in tables:
         table_id = table.get("table_id", "")
@@ -119,14 +167,18 @@ def ingest_base_and_attachments(lark, store, embedder, seen, stats):
                             title, url, "\n".join(lines), seen, stats)
 
             if config.INGEST_ATTACHMENTS:
+                fmap = _field_map(lark, app_token, table_id)
                 for k, v in fields.items():
                     if not _is_attachment_value(v):
                         continue
+                    field_id = fmap.get(k)
                     for att in v:
-                        _ingest_attachment(lark, store, embedder, att, table_name, url, seen, stats)
+                        _ingest_attachment(lark, store, embedder, att, table_name, url,
+                                           seen, stats, table_id, field_id, record_id)
 
 
-def _ingest_attachment(lark, store, embedder, att, table_name, url, seen, stats):
+def _ingest_attachment(lark, store, embedder, att, table_name, url, seen, stats,
+                       table_id=None, field_id=None, record_id=None):
     name = att.get("name", "")
     token = att.get("file_token", "")
     size = att.get("size", 0) or 0
@@ -141,7 +193,7 @@ def _ingest_attachment(lark, store, embedder, att, table_name, url, seen, stats)
         stats["skipped"] += 1
         return
     try:
-        data = lark.download_drive_file(token)
+        data = _download_attachment(lark, table_id, field_id, record_id, token)
     except Exception as e:
         logger.warning("attachment download failed %s: %s", name, str(e)[:120])
         return
