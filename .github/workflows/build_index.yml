@@ -1,0 +1,68 @@
+name: Build RAG Index
+
+# Rebuilds the Lark knowledge index and commits it back to the repo.
+# Railway auto-deploys on push, so a fresh index ships to the bot automatically.
+
+on:
+  schedule:
+    # 5:00 AM EST (10:00 UTC) daily -- before the morning digest.
+    - cron: '0 10 * * *'
+  workflow_dispatch:        # manual "Run workflow" button
+    inputs:
+      force:
+        description: 'Re-index everything (ignore content-hash skips)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write           # needed to commit the rebuilt index
+
+concurrency:
+  group: rag-index
+  cancel-in-progress: true
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install OCR engine (for scanned PDFs / images)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-rag.txt
+
+      - name: Build index
+        env:
+          # Lark (reuse the secrets the other workflows already use)
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_URL: ${{ secrets.LARK_BASE_URL }}
+          LARK_BASE_APP_TOKEN: ${{ secrets.LARK_BASE_APP_TOKEN }}
+          LARK_TENANT_DOMAIN: ${{ secrets.LARK_TENANT_DOMAIN }}
+          # Embeddings -- set ONE of these as a repo secret.
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python -m rag.ingest ${{ inputs.force && '--force' || '' }}
+
+      - name: Commit updated index
+        run: |
+          git config user.name  "iron-bot-indexer"
+          git config user.email "actions@users.noreply.github.com"
+          git add rag_index/
+          if git diff --cached --quiet; then
+            echo "Index unchanged -- nothing to commit."
+          else
+            git commit -m "chore(rag): rebuild Lark index [skip ci]"
+            git push
+          fi
