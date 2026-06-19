@@ -62,7 +62,17 @@ jobs:
           git add rag_index/
           if git diff --cached --quiet; then
             echo "Index unchanged -- nothing to commit."
-          else
-            git commit -m "chore(rag): rebuild Lark index [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "chore(rag): rebuild Lark index [skip ci]"
+          # main may have moved since checkout; sync-before-push with retries so
+          # a concurrent commit doesn't reject our index push.
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "index pushed"; exit 0
+            fi
+            echo "push rejected; rebasing on latest main and retrying ($i)..."
+            git pull --rebase -X ours origin main || git rebase --abort
+            sleep $((RANDOM % 5 + 3))
+          done
+          echo "could not push index after retries"; exit 1
