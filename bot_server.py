@@ -1811,7 +1811,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         answer = None
         for _ in range(6):
             response = anthropic_client.messages.create(
-                model="claude-opus-4-8",
+                model="claude-sonnet-4-6",
                 max_tokens=4096,
                 system=system_prompt,
                 tools=iron_tools.TOOL_SCHEMAS,
