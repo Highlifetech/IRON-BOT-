@@ -60,6 +60,72 @@ LARK_CHAT_ID_BRIEANNE = os.environ.get("LARK_CHAT_ID_BRIEANNE", "")
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 lark = LarkClient()
+
+# ---------------------------------------------------------------------------
+# Act-as-user mode: route Iron Bot's READS and content EDITS through the
+# lark-mcp connector, which calls Lark with the user's (your) login. This lets
+# Iron Bot see/act on everything you can, like the connector does — without
+# being a member of each resource. Messages, replies, and uploads still go out
+# as the BOT (its own identity), so it posts as Iron Bot, not as you.
+#
+# Enabled only when LARK_MCP_URL + LARK_MCP_TOKEN are set; otherwise the bot
+# behaves exactly as before (its own tenant token). If the connector is ever
+# unreachable, each call falls back to the bot's own token, so nothing breaks.
+# ---------------------------------------------------------------------------
+_MCP_URL = os.environ.get("LARK_MCP_URL", "").strip().rstrip("/")
+_MCP_TOKEN = os.environ.get("LARK_MCP_TOKEN", "").strip()
+if _MCP_URL and _MCP_TOKEN:
+    import requests as _proxy_requests
+
+    _orig_get, _orig_post, _orig_delete = lark._get, lark._post, lark._delete
+
+    def _bot_identity_path(method, path):
+        """Sends/replies/uploads must stay as the bot, not act as the user."""
+        p = path or ""
+        return method in ("POST", "PUT", "PATCH") and (
+            "/im/v1/messages" in p or "/im/v1/images" in p or "/im/v1/files" in p)
+
+    def _proxy_call(method, path, params=None, body=None):
+        p = path or ""
+        if p.startswith("/open-apis/"):
+            p = p[len("/open-apis/"):]
+        p = p.lstrip("/")
+        resp = _proxy_requests.post(
+            _MCP_URL + "/lark",
+            headers={"Authorization": "Bearer " + _MCP_TOKEN,
+                     "Content-Type": "application/json"},
+            json={"method": method, "path": p, "params": params, "json": body},
+            timeout=60)
+        return resp.json()
+
+    def _get_as_user(path, params=None, **k):
+        if _bot_identity_path("GET", path):
+            return _orig_get(path, params, **k)
+        try:
+            return _proxy_call("GET", path, params=params)
+        except Exception as _e:  # noqa: BLE001 - resilience fallback
+            logger.warning("act-as-user GET proxy failed (%s); using bot token", _e)
+            return _orig_get(path, params, **k)
+
+    def _post_as_user(path, body=None, **k):
+        if _bot_identity_path("POST", path):
+            return _orig_post(path, body, **k)
+        try:
+            return _proxy_call("POST", path, body=body)
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("act-as-user POST proxy failed (%s); using bot token", _e)
+            return _orig_post(path, body, **k)
+
+    def _delete_as_user(path, body=None, **k):
+        try:
+            return _proxy_call("DELETE", path, body=body)
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("act-as-user DELETE proxy failed (%s); using bot token", _e)
+            return _orig_delete(path, body, **k)
+
+    lark._get, lark._post, lark._delete = _get_as_user, _post_as_user, _delete_as_user
+    logger.info("Iron Bot act-as-user mode ON — reads/edits via %s", _MCP_URL)
+
 BOT_OPEN_ID = None
 
 processed_message_ids = {}
