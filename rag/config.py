@@ -46,9 +46,10 @@ INGEST_DMS = os.environ.get("RAG_INGEST_DMS", "0") == "1"
 # Cap messages pulled per chat (most recent N) to bound build time/cost.
 MAX_MESSAGES_PER_CHAT = int(os.environ.get("RAG_MAX_MESSAGES_PER_CHAT", "1500"))
 
-# Skip downloading attachments larger than this (MB). Raised to cover large
-# project mockups / tech-pack PDFs.
-MAX_ATTACHMENT_MB = int(os.environ.get("RAG_MAX_ATTACHMENT_MB", "200"))
+# Skip downloading attachments larger than this (MB). Kept modest so the first
+# build finishes fast; raise (e.g. 200) for an overnight deep build that also
+# ingests large mockups / tech-pack PDFs.
+MAX_ATTACHMENT_MB = int(os.environ.get("RAG_MAX_ATTACHMENT_MB", "20"))
 
 # Lark tenant domain for building human-readable citation URLs.
 LARK_TENANT_DOMAIN = os.environ.get("LARK_TENANT_DOMAIN", "")  # e.g. "hlt.larksuite.com"
