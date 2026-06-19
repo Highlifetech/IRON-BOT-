@@ -291,9 +291,72 @@ def _primary_calendar_id(lark) -> str:
 
 
 # ---------------------------------------------------------------------------
+# On-mention wiki self-join: if a wiki tool fails because Iron Bot isn't a
+# member of the space, ask the lark-mcp connector (which holds the admin user
+# token) to add Iron Bot to that space, then retry once. The bot can't add
+# itself — Lark requires the caller to already be a space admin.
+# ---------------------------------------------------------------------------
+import os
+
+_WIKI_RETRY = {"lark_list_wiki_nodes", "read_wiki_page", "overwrite_doc", "create_wiki_page"}
+
+
+def _looks_like_access_error(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    err = str(result.get("error", "")).lower()
+    if not err:
+        return False
+    return any(k in err for k in (
+        "131006", "131005", "permission", "forbidden", "no permission",
+        "not a member", "99991663", "access denied"))
+
+
+def _ensure_wiki_access(space_id: str = "", node_token: str = "") -> bool:
+    """Ask the connector to add Iron Bot to a wiki space. Returns True on success.
+    Configured via env: LARK_MCP_URL (base, e.g. https://…railway.app) and
+    optional LARK_MCP_TOKEN (the connector's MCP_AUTH_TOKEN)."""
+    base = os.getenv("LARK_MCP_URL", "").strip().rstrip("/")
+    if not base or (not space_id and not node_token):
+        return False
+    params = {"space_id": space_id} if space_id else {"node_token": node_token}
+    headers = {}
+    tok = os.getenv("LARK_MCP_TOKEN", "").strip()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    data: Dict[str, Any] = {}
+    try:
+        import requests
+        r = requests.post(base + "/join", params=params, headers=headers, timeout=20)
+        data = r.json()
+    except Exception:
+        try:
+            from urllib.parse import urlencode
+            import urllib.request
+            req = urllib.request.Request(base + "/join?" + urlencode(params), method="POST", headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception:
+            return False
+    return (isinstance(data, dict) and data.get("status") == "ok"
+            and str(data.get("result", "")).startswith(("added", "already")))
+
+
+# ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
 def execute_tool(lark, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a tool; for wiki tools, self-join the space and retry once on an
+    access error (the on-mention path)."""
+    result = _execute_once(lark, name, args)
+    if name in _WIKI_RETRY and _looks_like_access_error(result):
+        node_token = args.get("node_token", "") or (args.get("document_id", "") if name in ("overwrite_doc",) else "")
+        if _ensure_wiki_access(space_id=args.get("space_id", ""), node_token=node_token):
+            result = _execute_once(lark, name, args)
+    return result
+
+
+def _execute_once(lark, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a tool against the right client. Errors are returned, not raised."""
     try:
         # ---- Lark Base reads ----
