@@ -19,6 +19,14 @@ logger = logging.getLogger("rag.retrieval")
 _store = None
 _embedder = None
 
+# One-entry cache of the last successful retrieval. format_context() and
+# sources_footer() are always called with the SAME query back-to-back for a
+# single message, so this lets them share ONE embed + ONE vector search
+# instead of doing the (network-bound) work twice. Failures are NOT cached, so
+# a transient embedding error still retries on the next message.
+_last_query = None
+_last_hits = None
+
 
 def _ensure_loaded():
     global _store, _embedder
@@ -30,14 +38,19 @@ def _ensure_loaded():
 
 def retrieve(query, k=config.TOP_K, min_score=config.MIN_SCORE):
     """Return relevant chunks: list of dicts with content, title, url, score."""
+    global _last_query, _last_hits
+    cache_key = (query, k, min_score)
+    if _last_query == cache_key and _last_hits is not None:
+        return _last_hits
     store, embedder = _ensure_loaded()
     try:
         qvec = embedder.embed_query(query)
     except Exception as e:
         logger.warning("query embed failed: %s", str(e)[:120])
-        return []
-    hits = store.search(qvec, k=k)
-    return [h for h in hits if h["score"] >= min_score]
+        return []  # not cached -> retried next message
+    hits = [h for h in store.search(qvec, k=k) if h["score"] >= min_score]
+    _last_query, _last_hits = cache_key, hits
+    return hits
 
 
 def format_context(query, k=config.TOP_K, max_chars=config.MAX_CONTEXT_CHARS):
