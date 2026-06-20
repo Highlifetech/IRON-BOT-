@@ -96,7 +96,16 @@ if _MCP_URL and _MCP_TOKEN:
                      "Content-Type": "application/json"},
             json={"method": method, "path": p, "params": params, "json": body},
             timeout=60)
-        return resp.json()
+        # Non-200 (401 token mismatch, 503 proxy off / token expired) -> raise so
+        # the caller falls back to the bot's own token instead of failing closed.
+        if resp.status_code != 200:
+            raise RuntimeError(f"proxy HTTP {resp.status_code}: {resp.text[:120]}")
+        data = resp.json()
+        # A real Lark response always carries a "code" field. A bare {"error": …}
+        # is the proxy itself rejecting us — treat as failure and fall back.
+        if isinstance(data, dict) and "error" in data and "code" not in data:
+            raise RuntimeError("proxy rejected: " + str(data.get("error")))
+        return data
 
     def _get_as_user(path, params=None, **k):
         if _bot_identity_path("GET", path):
@@ -1853,7 +1862,13 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         _add_to_conversation(chat_id, "user", user_text)
         # RAG: retrieve the most relevant doc/record chunks for this question,
         # plus a small live record snapshot for date/aggregate math.
-        kb = retrieval.format_context(user_text)
+        # Guarded: a RAG failure (e.g. embedding-dimension mismatch in the index)
+        # must NOT crash the whole message — just skip the retrieved context.
+        try:
+            kb = retrieval.format_context(user_text)
+        except Exception as _rag_exc:  # noqa: BLE001
+            logger.warning("RAG retrieval failed, continuing without it: %s", _rag_exc)
+            kb = ""
         live = build_context(projects[:40])
         context = (kb + "\n\n--- LIVE RECORDS (snapshot) ---\n" + live).strip() if kb else live
         system_prompt = (
@@ -1896,7 +1911,10 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         if not answer:
             answer = "I couldn't finish that in a few steps \u2014 could you simplify the request?"
 
-        foot = retrieval.sources_footer(user_text)
+        try:
+            foot = retrieval.sources_footer(user_text)
+        except Exception:  # noqa: BLE001 - never let the sources footer break a reply
+            foot = ""
         if foot:
             answer = answer + "\n\n" + foot
 
