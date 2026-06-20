@@ -1855,11 +1855,13 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
                 return
             pending_actions.pop(chat_id, None)
 
+        _t0 = time.time()
         projects = fetch_all_projects()
         if scope != "brendan":
             projects = [p for p in projects if scope in p.get("__table_name__", "").lower()]
         chat_hist = _get_conversation(chat_id)
         _add_to_conversation(chat_id, "user", user_text)
+        _t_proj = time.time()
         # RAG: retrieve the most relevant doc/record chunks for this question,
         # plus a small live record snapshot for date/aggregate math.
         # Guarded: a RAG failure (e.g. embedding-dimension mismatch in the index)
@@ -1869,7 +1871,9 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         except Exception as _rag_exc:  # noqa: BLE001
             logger.warning("RAG retrieval failed, continuing without it: %s", _rag_exc)
             kb = ""
+        _t_rag = time.time()
         live = build_context(projects[:40])
+        _t_ctx = time.time()
         context = (kb + "\n\n--- LIVE RECORDS (snapshot) ---\n" + live).strip() if kb else live
         system_prompt = (
             "You are Iron Bot, HLT's internal assistant. Write exactly like a thoughtful person talking "
@@ -1889,13 +1893,23 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         user_message = f"--- LARK DATA ---\n{context}\n--- END ---\n\nQuestion: {user_text}"
         messages = (chat_hist or []) + [{"role": "user", "content": user_message}]
 
+        # Prompt caching: the system prompt + tool definitions are identical on
+        # every iteration of the tool loop and across messages, so cache them.
+        # The model reads the cached prefix back near-instantly instead of
+        # reprocessing it each step — a real speedup on multi-step replies.
+        _sys_cached = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+        _tools_cached = list(iron_tools.TOOL_SCHEMAS)
+        if _tools_cached:
+            _tools_cached[-1] = {**_tools_cached[-1], "cache_control": {"type": "ephemeral"}}
         answer = None
+        _iters = 0
         for _ in range(6):
+            _iters += 1
             response = anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=4096,
-                system=system_prompt,
-                tools=iron_tools.TOOL_SCHEMAS,
+                system=_sys_cached,
+                tools=_tools_cached,
                 messages=messages,
             )
             if response.stop_reason != "tool_use":
@@ -1911,12 +1925,17 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         if not answer:
             answer = "I couldn't finish that in a few steps \u2014 could you simplify the request?"
 
+        _t_model = time.time()
         try:
             foot = retrieval.sources_footer(user_text)
         except Exception:  # noqa: BLE001 - never let the sources footer break a reply
             foot = ""
         if foot:
             answer = answer + "\n\n" + foot
+        logger.info(
+            "[timing] projects=%.2fs rag=%.2fs buildctx=%.2fs model=%.2fs iters=%d total=%.2fs",
+            _t_proj - _t0, _t_rag - _t_proj, _t_ctx - _t_rag, _t_model - _t_ctx, _iters, time.time() - _t0,
+        )
 
         _add_to_conversation(chat_id, "assistant", answer)
         lark.send_group_message(answer, chat_id=chat_id)
