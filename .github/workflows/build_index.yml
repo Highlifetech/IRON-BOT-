@@ -7,7 +7,7 @@ on:
   schedule:
     # 5:00 AM EST (10:00 UTC) daily -- before the morning digest.
     - cron: '0 10 * * *'
-  workflow_dispatch:        # manual "Run workflow" button
+  workflow_dispatch:  # manual "Run workflow" button
     inputs:
       force:
         description: 'Re-index everything (ignore content-hash skips)'
@@ -15,7 +15,7 @@ on:
         default: false
 
 permissions:
-  contents: write           # needed to commit the rebuilt index
+  contents: write  # needed to commit the rebuilt index
 
 concurrency:
   group: rag-index
@@ -52,12 +52,14 @@ jobs:
           # Embeddings -- set ONE of these as a repo secret.
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Ingest large mockups / tech-pack PDFs / images (up to 100MB).
+          RAG_MAX_ATTACHMENT_MB: "100"
         run: |
           python -m rag.ingest ${{ inputs.force && '--force' || '' }}
 
       - name: Commit updated index
         run: |
-          git config user.name  "iron-bot-indexer"
+          git config user.name "iron-bot-indexer"
           git config user.email "actions@users.noreply.github.com"
           git add rag_index/
           if git diff --cached --quiet; then
