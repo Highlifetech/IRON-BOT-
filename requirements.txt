@@ -10,3 +10,9 @@ google-auth-httplib2>=0.1.0
 google-api-python-client>=2.100.0
 PyMuPDF>=1.23.0
 numpy>=1.26.0
+# --- RAG file/image extraction (read 30-100MB docs, sheets, decks, images) ---
+pytesseract>=0.3.10
+Pillow>=10.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+python-pptx>=0.6.23

@@ -1,0 +1,5 @@
+# Install the Tesseract OCR system binary so the RAG layer can read images
+# and scanned PDFs (pytesseract needs the `tesseract` binary, not just the
+# Python wrapper). Additive: Python build/start is still auto-detected.
+[phases.setup]
+aptPkgs = ["tesseract-ocr"]
