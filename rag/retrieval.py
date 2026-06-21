@@ -26,6 +26,13 @@ _embedder = None
 # a transient embedding error still retries on the next message.
 _last_query = None
 _last_hits = None
+_last_vec = None  # the embedding of the last query, reused for Q&A memory
+
+
+def last_query_vector():
+    """The embedding computed for the most recent retrieve() call, so callers
+    (e.g. Q&A memory) can reuse it instead of paying for a second embedding."""
+    return _last_vec
 
 
 def _ensure_loaded():
@@ -38,7 +45,7 @@ def _ensure_loaded():
 
 def retrieve(query, k=config.TOP_K, min_score=config.MIN_SCORE):
     """Return relevant chunks: list of dicts with content, title, url, score."""
-    global _last_query, _last_hits
+    global _last_query, _last_hits, _last_vec
     cache_key = (query, k, min_score)
     if _last_query == cache_key and _last_hits is not None:
         return _last_hits
@@ -48,6 +55,7 @@ def retrieve(query, k=config.TOP_K, min_score=config.MIN_SCORE):
     except Exception as e:
         logger.warning("query embed failed: %s", str(e)[:120])
         return []  # not cached -> retried next message
+    _last_vec = qvec
     hits = [h for h in store.search(qvec, k=k) if h["score"] >= min_score]
     _last_query, _last_hits = cache_key, hits
     return hits
