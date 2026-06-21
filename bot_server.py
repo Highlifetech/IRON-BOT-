@@ -28,6 +28,9 @@ BOT_NAME = os.environ.get("BOT_NAME", "Iron Bot")
 # The chat brain. Sonnet 4.6 is the high-quality + fast default; set BOT_MODEL=
 # claude-opus-4-8 for max quality (slower), or any other model id, with no code change.
 BOT_MODEL = os.environ.get("BOT_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
+# Live web search (Claude's native server-side tool). Set WEB_SEARCH=0 to disable.
+WEB_SEARCH_ENABLED = os.environ.get("WEB_SEARCH", "1").strip().lower() not in ("0", "false", "no", "")
+WEB_SEARCH_MAX_USES = int(os.environ.get("WEB_SEARCH_MAX_USES", "5") or "5")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 from config import (
@@ -2036,7 +2039,32 @@ def _handle_tool_call(name, args, chat_id):
     return {"error": f"Unknown tool '{name}'."}
 
 
-def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
+def _img_media_type(b):
+    """Sniff an image's MIME type from its magic bytes (for Claude vision)."""
+    if b[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if b[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
+def _deliver(text, chat_id, placeholder_id=None):
+    """Replace the 'working…' placeholder with the final answer; else send fresh."""
+    if placeholder_id:
+        try:
+            lark.edit_message(placeholder_id, "interactive", lark._build_card(text))
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("edit placeholder failed, sending fresh: %s", str(e)[:120])
+    lark.send_group_message(text, chat_id=chat_id)
+
+
+def _process_message(user_text, chat_id, scope="brendan", sender_id="", image_b64=None, image_media_type=None):
+    _ph_id = None
     try:
         # --- Confirmation path: a write action is pending for this chat ---
         pend = pending_actions.get(chat_id)
@@ -2064,6 +2092,13 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
                 lark.send_group_message(_hit[0], chat_id=chat_id)
                 logger.info("[cache] answer cache hit for chat %s", chat_id)
                 return
+        # Instant acknowledgment (the practical version of streaming for Lark):
+        # post "working…" now, then replace it with the answer when ready.
+        try:
+            _ph = lark.send_group_message("_Working on it…_", chat_id=chat_id)
+            _ph_id = (_ph or {}).get("message_id")
+        except Exception:  # noqa: BLE001
+            _ph_id = None
         _t0 = time.time()
         projects = fetch_all_projects()
         if scope != "brendan":
@@ -2117,7 +2152,15 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             "Use read tools freely to look things up, and never invent record_ids, table_ids, or user_ids \u2014 look them up first."
         )
         user_message = f"--- LARK DATA ---\n{context}\n--- END ---\n\nQuestion: {user_text}"
-        messages = (chat_hist or []) + [{"role": "user", "content": user_message}]
+        if image_b64:
+            user_content = [
+                {"type": "image", "source": {"type": "base64",
+                 "media_type": image_media_type or "image/png", "data": image_b64}},
+                {"type": "text", "text": user_message},
+            ]
+        else:
+            user_content = user_message
+        messages = (chat_hist or []) + [{"role": "user", "content": user_content}]
 
         # Prompt caching: the system prompt + tool definitions are identical on
         # every iteration of the tool loop and across messages, so cache them.
@@ -2127,6 +2170,11 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         _tools_cached = list(iron_tools.TOOL_SCHEMAS)
         if _tools_cached:
             _tools_cached[-1] = {**_tools_cached[-1], "cache_control": {"type": "ephemeral"}}
+        # Claude's native web search (server-side). Appended after the cache
+        # breakpoint so the cached tool prefix is unaffected.
+        if WEB_SEARCH_ENABLED:
+            _tools_cached = _tools_cached + [
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": WEB_SEARCH_MAX_USES}]
         answer = None
         _iters = 0
         _used_write = False
@@ -2176,10 +2224,13 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             _qa_store(scope, user_text, answer, _qvec)  # durable, searchable memory
 
         _add_to_conversation(chat_id, "assistant", answer)
-        lark.send_group_message(answer, chat_id=chat_id)
+        _deliver(answer, chat_id, _ph_id)
     except Exception as e:
         logger.error(f"Process message error: {e}")
-        lark.send_group_message(f"Error: {str(e)[:200]}", chat_id=chat_id)
+        try:
+            _deliver(f"Error: {str(e)[:200]}", chat_id, _ph_id)
+        except Exception:  # noqa: BLE001
+            lark.send_group_message(f"Error: {str(e)[:200]}", chat_id=chat_id)
 
 
 def _is_already_processed(message_id):
@@ -2503,17 +2554,39 @@ def webhook():
         if sender_id_val != BOT_OPEN_ID:
             threading.Thread(target=_handle_incoming_card, args=(msg, sender,), daemon=True).start()
         return jsonify({"code": 0})
-    if msg_type != "text":
+    image_b64 = image_media_type = None
+    if msg_type == "image":
+        # Vision: only in 1:1 DMs, so the bot never replies to every image in a
+        # group chat. Download the image and let the model actually see it.
+        if msg.get("chat_type", "") != "p2p":
+            return jsonify({"code": 0})
+        try:
+            content = json.loads(msg.get("content", "{}"))
+            ikey = content.get("image_key", "")
+            raw = lark.get_message_resource(message_id, ikey, "image") if ikey else b""
+            if raw:
+                import base64 as _b64
+                image_b64 = _b64.b64encode(raw).decode()
+                image_media_type = _img_media_type(raw)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("image fetch failed: %s", str(e)[:120])
+        user_text = "The user sent this image — take a look and respond helpfully."
+    elif msg_type == "text":
+        user_text = extract_question(msg)
+    else:
         return jsonify({"code": 0})
-    user_text = extract_question(msg)
-    if not user_text:
+    if not (user_text or image_b64):
         return jsonify({"code": 0})
     chat_id = msg.get("chat_id", "")
     if not chat_id:
         return jsonify({"code": 0})
     sender_open_id = sender.get("sender_id", {}).get("open_id", "")
     scope = get_user_scope(sender_open_id)
-    threading.Thread(target=_process_message, args=(user_text, chat_id, scope, sender_open_id), daemon=True).start()
+    threading.Thread(
+        target=_process_message,
+        args=(user_text, chat_id, scope, sender_open_id),
+        kwargs={"image_b64": image_b64, "image_media_type": image_media_type},
+        daemon=True).start()
     return jsonify({"code": 0})
 
 @app.route("/card-callback", methods=["POST"])
