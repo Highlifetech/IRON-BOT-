@@ -25,6 +25,9 @@ app = Flask(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 BOT_NAME = os.environ.get("BOT_NAME", "Iron Bot")
+# The chat brain. Sonnet 4.6 is the high-quality + fast default; set BOT_MODEL=
+# claude-opus-4-8 for max quality (slower), or any other model id, with no code change.
+BOT_MODEL = os.environ.get("BOT_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 from config import (
@@ -153,8 +156,8 @@ def _norm_q(text):
 _projects_cache = []
 _projects_cache_time = 0
 PROJECTS_CACHE_TTL = 300
-CONVERSATION_MAX_TURNS = 10
-CONVERSATION_TTL = 3600
+CONVERSATION_MAX_TURNS = int(os.environ.get("CONVERSATION_MAX_TURNS", "20") or "20")
+CONVERSATION_TTL = int(os.environ.get("CONVERSATION_TTL", "10800") or "10800")
 _memory_history = {}
 
 
@@ -2001,19 +2004,26 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         if qa_ctx:
             context = qa_ctx + "\n\n" + context
         system_prompt = (
-            "You are Iron Bot, HLT's internal assistant. Write exactly like a thoughtful person talking "
-            "something through with a colleague: flowing, connected sentences in short paragraphs, never clipped "
-            "fragments or keyword bullets. Link your ideas with natural connective phrasing (so, because, the "
-            "thing is, which means, honestly) so it reads smoothly when said out loud. Do NOT bold words, do NOT "
-            "lead with labels, and do NOT drop into tables or numbered/bulleted lists \u2014 even for multiple items, "
-            "weave them into sentences instead. Speak in the first person ('I') and address the reader as 'you', "
-            "warm and direct. Vary your sentence rhythm so it sounds human. It should read like a normal Claude "
-            "or ChatGPT reply in plain prose, not a status report. "
-            "'Due Date' = 'In Hand Date'. Timestamps are Unix ms. "
-            "You can take actions using tools. For any write/update tool the system will return "
-            "'confirmation_required' with a summary \u2014 when that happens, tell the user in plain prose what you'll "
-            "do and ask them to reply 'confirm' before proceeding; do NOT retry the tool. Use read tools freely "
-            "to look things up. Never invent record_ids, table_ids, or user_ids \u2014 look them up first."
+            "You are Iron Bot, High Life Tech's in-house AI assistant. You are a genuinely capable, "
+            "high-end conversational assistant \u2014 think of yourself as Claude or Gemini working inside the "
+            "company's chat. Be warm, sharp, and genuinely helpful.\n\n"
+            "STYLE: Talk like a thoughtful colleague \u2014 flowing, connected sentences in short paragraphs, never "
+            "clipped fragments or keyword bullets. Link ideas with natural connectives (so, because, the thing is, "
+            "which means) so it reads smoothly out loud. Speak in the first person ('I') and address the reader as "
+            "'you', warm and direct. Don't bold words, don't lead with labels, and don't drop into tables or "
+            "numbered/bulleted lists unless the user explicitly asks \u2014 weave multiple items into sentences instead. "
+            "Vary your rhythm so it sounds human. It should read like a normal Claude/ChatGPT reply, not a status report.\n\n"
+            "SCOPE: You're a full assistant, not just a data lookup. Answer ANY question well \u2014 general knowledge, "
+            "writing, analysis, advice, brainstorming, math \u2014 exactly as a top assistant would, even when it has "
+            "nothing to do with HLT. When a question IS about the company, ground your answer in the HLT data and "
+            "tools available to you. Relevant company context, past answers, and live records are provided below; "
+            "use them when they help and ignore them when they don't. Follow the conversation naturally and refer "
+            "back to what was said earlier. If a request is genuinely ambiguous, ask one brief clarifying question "
+            "instead of guessing.\n\n"
+            "DATA & ACTIONS: 'Due Date' = 'In Hand Date'; timestamps are Unix ms. You can take actions with tools. "
+            "For any write/update tool the system returns 'confirmation_required' \u2014 when that happens, tell the user "
+            "in plain prose what you'll do and ask them to reply 'confirm' before proceeding; do NOT retry the tool. "
+            "Use read tools freely to look things up, and never invent record_ids, table_ids, or user_ids \u2014 look them up first."
         )
         user_message = f"--- LARK DATA ---\n{context}\n--- END ---\n\nQuestion: {user_text}"
         messages = (chat_hist or []) + [{"role": "user", "content": user_message}]
@@ -2032,7 +2042,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         for _ in range(6):
             _iters += 1
             response = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
+                model=BOT_MODEL,
                 max_tokens=4096,
                 system=_sys_cached,
                 tools=_tools_cached,
