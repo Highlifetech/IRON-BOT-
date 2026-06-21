@@ -139,6 +139,17 @@ BOT_OPEN_ID = None
 
 processed_message_ids = {}
 DEDUP_TTL = 300
+
+# --- Answer cache: store recent Q&A so an identical question (per user scope)
+# is answered instantly instead of re-running the whole think-act loop. Kept
+# short-lived (TTL) so live data can't go stale, and NEVER used for actions.
+_ANSWER_CACHE = {}  # "scope|normalized_question" -> (answer, expires_at)
+ANSWER_CACHE_ENABLED = os.environ.get("ANSWER_CACHE", "1").strip().lower() not in ("0", "false", "no", "")
+ANSWER_CACHE_TTL = int(os.environ.get("ANSWER_CACHE_TTL_SEC", "900") or "900")  # 15 min default
+
+
+def _norm_q(text):
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 _projects_cache = []
 _projects_cache_time = 0
 PROJECTS_CACHE_TTL = 300
@@ -1855,6 +1866,15 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
                 return
             pending_actions.pop(chat_id, None)
 
+        _cache_key = (scope or "brendan") + "|" + _norm_q(user_text)
+        if ANSWER_CACHE_ENABLED:
+            _hit = _ANSWER_CACHE.get(_cache_key)
+            if _hit and _hit[1] > time.time():
+                _add_to_conversation(chat_id, "user", user_text)
+                _add_to_conversation(chat_id, "assistant", _hit[0])
+                lark.send_group_message(_hit[0], chat_id=chat_id)
+                logger.info("[cache] answer cache hit for chat %s", chat_id)
+                return
         _t0 = time.time()
         projects = fetch_all_projects()
         if scope != "brendan":
@@ -1903,6 +1923,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             _tools_cached[-1] = {**_tools_cached[-1], "cache_control": {"type": "ephemeral"}}
         answer = None
         _iters = 0
+        _used_write = False
         for _ in range(6):
             _iters += 1
             response = anthropic_client.messages.create(
@@ -1919,6 +1940,8 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             tool_results = []
             for b in response.content:
                 if b.type == "tool_use":
+                    if b.name in iron_tools.WRITE_TOOLS:
+                        _used_write = True
                     out = _handle_tool_call(b.name, dict(b.input), chat_id)
                     tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": json.dumps(out)})
             messages.append({"role": "user", "content": tool_results})
@@ -1936,6 +1959,13 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             "[timing] projects=%.2fs rag=%.2fs buildctx=%.2fs model=%.2fs iters=%d total=%.2fs",
             _t_proj - _t0, _t_rag - _t_proj, _t_ctx - _t_rag, _t_model - _t_ctx, _iters, time.time() - _t0,
         )
+        # Cache the answer for repeat questions — but never for actions/failures.
+        if ANSWER_CACHE_ENABLED and answer and not _used_write and "couldn't finish" not in answer:
+            _ANSWER_CACHE[_cache_key] = (answer, time.time() + ANSWER_CACHE_TTL)
+            if len(_ANSWER_CACHE) > 500:
+                _now = time.time()
+                for _k in [k for k, v in list(_ANSWER_CACHE.items()) if v[1] <= _now]:
+                    _ANSWER_CACHE.pop(_k, None)
 
         _add_to_conversation(chat_id, "assistant", answer)
         lark.send_group_message(answer, chat_id=chat_id)
