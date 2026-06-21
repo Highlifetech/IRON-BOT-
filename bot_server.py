@@ -157,7 +157,8 @@ _projects_cache = []
 _projects_cache_time = 0
 PROJECTS_CACHE_TTL = 300
 CONVERSATION_MAX_TURNS = int(os.environ.get("CONVERSATION_MAX_TURNS", "20") or "20")
-CONVERSATION_TTL = int(os.environ.get("CONVERSATION_TTL", "10800") or "10800")
+# Effectively permanent (10 years) — conversation history is kept, not expired.
+CONVERSATION_TTL = int(os.environ.get("CONVERSATION_TTL", "315360000") or "315360000")
 _memory_history = {}
 
 
@@ -343,7 +344,14 @@ QA_MEMORY_ENABLED = os.environ.get("QA_MEMORY", "1").strip().lower() not in ("0"
 QA_RECALL_FETCH = int(os.environ.get("QA_RECALL_FETCH", "300") or "300")
 QA_RECALL_TOPK = int(os.environ.get("QA_RECALL_TOPK", "2") or "2")
 QA_RECALL_MIN_SIM = float(os.environ.get("QA_RECALL_MIN_SIM", "0.82") or "0.82")
+QA_EMBED_DIM = int(os.environ.get("QA_EMBED_DIM", "1024") or "1024")  # voyage-3-large = 1024
 _qa_mem_fallback = []  # used only when no DB is configured
+_qa_pgvector = None    # None=untried, True/False once probed
+
+
+def _vec_str(vec):
+    """pgvector-friendly literal, e.g. '[0.1,0.2,...]'."""
+    return "[" + ",".join(f"{float(x):.6f}" for x in vec) + "]"
 
 
 def _qa_ensure(cur):
@@ -353,26 +361,107 @@ def _qa_ensure(cur):
         "embedding TEXT, created_at TIMESTAMPTZ DEFAULT now())")
 
 
+def _qa_pgvector_ready():
+    """Enable pgvector once (extension + vector column + ANN index + backfill of
+    existing rows) so Q&A recall stays fast over UNLIMITED history. If pgvector
+    isn't available on this Postgres, fall back to the bounded numpy scan."""
+    global _qa_pgvector
+    if _qa_pgvector is not None:
+        return _qa_pgvector
+    conn = _get_db_conn()
+    if not conn:
+        _qa_pgvector = False
+        return False
+    try:
+        with conn.cursor() as cur:
+            _qa_ensure(cur)
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cur.execute(f"ALTER TABLE qa_memory ADD COLUMN IF NOT EXISTS embedding_vec vector({QA_EMBED_DIM})")
+        conn.commit()
+        try:  # index + backfill are best-effort
+            with conn.cursor() as cur:
+                cur.execute("CREATE INDEX IF NOT EXISTS qa_memory_vec_idx ON qa_memory "
+                            "USING hnsw (embedding_vec vector_cosine_ops)")
+                cur.execute("UPDATE qa_memory SET embedding_vec = embedding::vector "
+                            "WHERE embedding_vec IS NULL AND embedding IS NOT NULL")
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("pgvector index/backfill skipped: %s", str(e)[:140])
+        _qa_pgvector = True
+        logger.info("Q&A memory: pgvector ON — unlimited, fast recall")
+    except Exception as e:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _qa_pgvector = False
+        logger.warning("pgvector unavailable, using bounded scan: %s", str(e)[:160])
+    finally:
+        _put_db_conn(conn)
+    return _qa_pgvector
+
+
+def _qa_recall_pg(scope, vec):
+    """Fast ANN recall across ALL Q&A for this scope using pgvector."""
+    qs = _vec_str(vec)
+    rows = []
+    conn = _get_db_conn()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    "SELECT question, answer, 1 - (embedding_vec <=> %s::vector) AS sim "
+                    "FROM qa_memory WHERE scope=%s AND embedding_vec IS NOT NULL "
+                    "ORDER BY embedding_vec <=> %s::vector LIMIT %s",
+                    (qs, scope, qs, QA_RECALL_TOPK))
+                rows = cur.fetchall()
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("qa_recall(pgvector) failed: %s", str(e)[:120])
+        finally:
+            _put_db_conn(conn)
+    top = [(float(r["sim"]), r["question"], r["answer"]) for r in rows
+           if r["sim"] is not None and float(r["sim"]) >= QA_RECALL_MIN_SIM]
+    if not top:
+        return ""
+    out = ["--- THINGS YOU'VE ANSWERED BEFORE (reuse only if still accurate) ---"]
+    for _s, _q, _a in top:
+        out.append(f"Q: {_q}\nA: {_a}")
+    out.append("--- END PAST ANSWERS ---")
+    return "\n".join(out)
+
+
 def _qa_store(scope, question, answer, vec):
     """Persist a question+answer with its embedding so it can be recalled later."""
     if not (QA_MEMORY_ENABLED and vec and answer and question):
         return
-    emb = json.dumps([round(float(x), 6) for x in vec])
+    vs = _vec_str(vec)
+    pg = _qa_pgvector_ready()
     conn = _get_db_conn()
     if conn:
         try:
             with conn.cursor() as cur:
                 _qa_ensure(cur)
-                cur.execute(
-                    "INSERT INTO qa_memory (scope, question, answer, embedding) VALUES (%s,%s,%s,%s)",
-                    (scope, question[:4000], answer[:8000], emb))
+                if pg:
+                    cur.execute(
+                        "INSERT INTO qa_memory (scope, question, answer, embedding, embedding_vec) "
+                        "VALUES (%s,%s,%s,%s,%s::vector)",
+                        (scope, question[:4000], answer[:8000], vs, vs))
+                else:
+                    cur.execute(
+                        "INSERT INTO qa_memory (scope, question, answer, embedding) VALUES (%s,%s,%s,%s)",
+                        (scope, question[:4000], answer[:8000], vs))
             conn.commit()
             return
         except Exception as e:  # noqa: BLE001
             logger.warning("qa_store failed: %s", str(e)[:120])
         finally:
             _put_db_conn(conn)
-    _qa_mem_fallback.append({"scope": scope, "question": question, "answer": answer, "embedding": emb})
+    _qa_mem_fallback.append({"scope": scope, "question": question, "answer": answer, "embedding": vs})
     if len(_qa_mem_fallback) > 2000:
         del _qa_mem_fallback[:1000]
 
@@ -381,6 +470,8 @@ def _qa_recall(scope, vec):
     """Return a small block of the most similar past Q&A for this scope."""
     if not (QA_MEMORY_ENABLED and vec):
         return ""
+    if _qa_pgvector_ready():
+        return _qa_recall_pg(scope, vec)
     rows = []
     conn = _get_db_conn()
     if conn:
