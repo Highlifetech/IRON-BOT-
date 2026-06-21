@@ -332,6 +332,101 @@ def _add_to_conversation(chat_id, role, content):
 
 
 # =========================================================================
+# Q&A MEMORY - a durable, searchable record of every question + answer, so the
+# bot recalls relevant past answers. Reuses the RAG query embedding (no extra
+# embedding call); recall is a bounded in-process cosine search.
+# =========================================================================
+QA_MEMORY_ENABLED = os.environ.get("QA_MEMORY", "1").strip().lower() not in ("0", "false", "no", "")
+QA_RECALL_FETCH = int(os.environ.get("QA_RECALL_FETCH", "300") or "300")
+QA_RECALL_TOPK = int(os.environ.get("QA_RECALL_TOPK", "2") or "2")
+QA_RECALL_MIN_SIM = float(os.environ.get("QA_RECALL_MIN_SIM", "0.82") or "0.82")
+_qa_mem_fallback = []  # used only when no DB is configured
+
+
+def _qa_ensure(cur):
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS qa_memory ("
+        "id SERIAL PRIMARY KEY, scope TEXT, question TEXT, answer TEXT, "
+        "embedding TEXT, created_at TIMESTAMPTZ DEFAULT now())")
+
+
+def _qa_store(scope, question, answer, vec):
+    """Persist a question+answer with its embedding so it can be recalled later."""
+    if not (QA_MEMORY_ENABLED and vec and answer and question):
+        return
+    emb = json.dumps([round(float(x), 6) for x in vec])
+    conn = _get_db_conn()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                _qa_ensure(cur)
+                cur.execute(
+                    "INSERT INTO qa_memory (scope, question, answer, embedding) VALUES (%s,%s,%s,%s)",
+                    (scope, question[:4000], answer[:8000], emb))
+            conn.commit()
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("qa_store failed: %s", str(e)[:120])
+        finally:
+            _put_db_conn(conn)
+    _qa_mem_fallback.append({"scope": scope, "question": question, "answer": answer, "embedding": emb})
+    if len(_qa_mem_fallback) > 2000:
+        del _qa_mem_fallback[:1000]
+
+
+def _qa_recall(scope, vec):
+    """Return a small block of the most similar past Q&A for this scope."""
+    if not (QA_MEMORY_ENABLED and vec):
+        return ""
+    rows = []
+    conn = _get_db_conn()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                _qa_ensure(cur)
+                cur.execute(
+                    "SELECT question, answer, embedding FROM qa_memory WHERE scope=%s "
+                    "ORDER BY created_at DESC LIMIT %s", (scope, QA_RECALL_FETCH))
+                rows = cur.fetchall()
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("qa_recall failed: %s", str(e)[:120])
+        finally:
+            _put_db_conn(conn)
+    else:
+        rows = [r for r in _qa_mem_fallback if r["scope"] == scope][-QA_RECALL_FETCH:]
+    if not rows:
+        return ""
+    try:
+        import numpy as np
+        q = np.asarray(vec, dtype="float32")
+        q = q / (float(np.linalg.norm(q)) or 1.0)
+        scored = []
+        for r in rows:
+            try:
+                e = np.asarray(json.loads(r["embedding"]), dtype="float32")
+            except Exception:
+                continue
+            if e.shape != q.shape:
+                continue
+            sim = float(np.dot(q, e / (float(np.linalg.norm(e)) or 1.0)))
+            if sim >= QA_RECALL_MIN_SIM:
+                scored.append((sim, r["question"], r["answer"]))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:QA_RECALL_TOPK]
+        if not top:
+            return ""
+        out = ["--- THINGS YOU'VE ANSWERED BEFORE (reuse only if still accurate) ---"]
+        for _sim, _q, _a in top:
+            out.append(f"Q: {_q}\nA: {_a}")
+        out.append("--- END PAST ANSWERS ---")
+        return "\n".join(out)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("qa_recall cosine failed: %s", str(e)[:120])
+        return ""
+
+
+# =========================================================================
 # HELPERS - Flexible field lookup (tries multiple field names)
 # =========================================================================
 def _get_field(fields, primary, alternates=None):
@@ -1892,9 +1987,19 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             logger.warning("RAG retrieval failed, continuing without it: %s", _rag_exc)
             kb = ""
         _t_rag = time.time()
+        # Q&A memory: recall similar past answers (reuses the RAG query vector,
+        # so no extra embedding call).
+        _qvec = None
+        try:
+            _qvec = retrieval.last_query_vector()
+        except Exception:  # noqa: BLE001
+            _qvec = None
+        qa_ctx = _qa_recall(scope, _qvec) if _qvec else ""
         live = build_context(projects[:40])
         _t_ctx = time.time()
         context = (kb + "\n\n--- LIVE RECORDS (snapshot) ---\n" + live).strip() if kb else live
+        if qa_ctx:
+            context = qa_ctx + "\n\n" + context
         system_prompt = (
             "You are Iron Bot, HLT's internal assistant. Write exactly like a thoughtful person talking "
             "something through with a colleague: flowing, connected sentences in short paragraphs, never clipped "
@@ -1960,12 +2065,14 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
             _t_proj - _t0, _t_rag - _t_proj, _t_ctx - _t_rag, _t_model - _t_ctx, _iters, time.time() - _t0,
         )
         # Cache the answer for repeat questions — but never for actions/failures.
-        if ANSWER_CACHE_ENABLED and answer and not _used_write and "couldn't finish" not in answer:
-            _ANSWER_CACHE[_cache_key] = (answer, time.time() + ANSWER_CACHE_TTL)
-            if len(_ANSWER_CACHE) > 500:
-                _now = time.time()
-                for _k in [k for k, v in list(_ANSWER_CACHE.items()) if v[1] <= _now]:
-                    _ANSWER_CACHE.pop(_k, None)
+        if answer and not _used_write and "couldn't finish" not in answer:
+            if ANSWER_CACHE_ENABLED:
+                _ANSWER_CACHE[_cache_key] = (answer, time.time() + ANSWER_CACHE_TTL)
+                if len(_ANSWER_CACHE) > 500:
+                    _now = time.time()
+                    for _k in [k for k, v in list(_ANSWER_CACHE.items()) if v[1] <= _now]:
+                        _ANSWER_CACHE.pop(_k, None)
+            _qa_store(scope, user_text, answer, _qvec)  # durable, searchable memory
 
         _add_to_conversation(chat_id, "assistant", answer)
         lark.send_group_message(answer, chat_id=chat_id)
