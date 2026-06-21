@@ -54,6 +54,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Ingest large mockups / tech-pack PDFs / images (up to 100MB).
           RAG_MAX_ATTACHMENT_MB: "100"
+          # Index the FULL message history per channel (not just the recent ones).
+          RAG_MAX_MESSAGES_PER_CHAT: "1000000"
         run: |
           python -m rag.ingest ${{ inputs.force && '--force' || '' }}
 
