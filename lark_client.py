@@ -784,36 +784,67 @@ class LarkClient:
         data = self._post(f"/open-apis/wiki/v2/spaces/{space_id}/nodes/{node_token}/move", body=body)
         return data.get("data", {})
 
-    def get_wiki_node_content(self, node_token):
-        data = self._get(f"/open-apis/docx/v1/documents/{node_token}/raw_content")
+    def get_wiki_node_content(self, obj_token, obj_type="docx"):
+        """Read a wiki node's underlying document text.
+
+        IMPORTANT: a wiki node is a *wrapper* around a real object whose token is
+        `obj_token` -- NOT the node_token. The docx raw_content API only accepts a
+        docx document token, so passing node_token here returns nothing. Sheets /
+        Bitable / mindnote nodes have no docx body and are skipped (their data is
+        already ingested via the Base/Drive paths)."""
+        if obj_type and obj_type not in ("docx", "doc"):
+            return ""
+        if not obj_token:
+            return ""
+        data = self._get(f"/open-apis/docx/v1/documents/{obj_token}/raw_content")
         if data.get("code") == 0:
             return data.get("data", {}).get("content", "")
         return ""
 
     def fetch_all_wiki_pages(self):
+        """Walk EVERY wiki space the token can see, recursing into child nodes,
+        and return each page's full document text. Fixes two earlier bugs:
+        (1) content was fetched with node_token instead of obj_token (always
+        empty), and (2) only top-level nodes were listed, so nested pages were
+        skipped. Content is no longer truncated -- chunking handles size."""
         all_pages = []
+
+        def _walk(space_id, space_name, parent_token=None, depth=0):
+            if depth > 12:  # guard against pathological cycles
+                return
+            try:
+                nodes = self.list_wiki_nodes(space_id, parent_node_token=parent_token)
+            except Exception as e:
+                logger.warning(f"Wiki nodes fetch error ({space_name}): {e}")
+                return
+            for node in nodes:
+                node_token = node.get("node_token", "")
+                obj_token = node.get("obj_token", "") or node_token
+                obj_type = node.get("obj_type", "docx")
+                title = node.get("title", "") or "(untitled)"
+                try:
+                    content = self.get_wiki_node_content(obj_token, obj_type)
+                    if content and content.strip():
+                        all_pages.append({
+                            "space": space_name,
+                            "title": title,
+                            "node_token": node_token,
+                            "content": content,
+                        })
+                except Exception as e:
+                    logger.warning(f"Wiki page fetch error ({title}): {e}")
+                if node.get("has_child"):
+                    _walk(space_id, space_name, parent_token=node_token, depth=depth + 1)
+
         try:
             spaces = self.list_wiki_spaces()
-            for space in spaces:
-                space_id = space.get("space_id", "")
-                space_name = space.get("name", "")
-                try:
-                    nodes = self.list_wiki_nodes(space_id)
-                    for node in nodes:
-                        node_token = node.get("node_token", "")
-                        node_title = node.get("title", "")
-                        try:
-                            content = self.get_wiki_node_content(node_token)
-                            all_pages.append({
-                                "space": space_name, "title": node_title,
-                                "content": content[:3000]
-                            })
-                        except Exception as e:
-                            logger.warning(f"Wiki page fetch error ({node_title}): {e}")
-                except Exception as e:
-                    logger.warning(f"Wiki space fetch error ({space_name}): {e}")
         except Exception as e:
-            logger.error(f"Wiki fetch error: {e}")
+            logger.error(f"Wiki spaces fetch error: {e}")
+            return all_pages
+        logger.info(f"Wiki: scanning {len(spaces)} space(s)")
+        for space in spaces:
+            _walk(space.get("space_id", ""), space.get("name", ""))
+        logger.info(f"Wiki: collected {len(all_pages)} page(s) with content")
         return all_pages
 
     # =========================================================================
