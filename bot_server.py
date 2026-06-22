@@ -348,6 +348,8 @@ QA_RECALL_FETCH = int(os.environ.get("QA_RECALL_FETCH", "300") or "300")
 QA_RECALL_TOPK = int(os.environ.get("QA_RECALL_TOPK", "2") or "2")
 QA_RECALL_MIN_SIM = float(os.environ.get("QA_RECALL_MIN_SIM", "0.82") or "0.82")
 QA_EMBED_DIM = int(os.environ.get("QA_EMBED_DIM", "1024") or "1024")  # voyage-3-large = 1024
+# Token gating the /seed-qa endpoint (load canonical golden Q&A). Unset = disabled.
+SEED_TOKEN = os.environ.get("SEED_TOKEN", "").strip()
 _qa_mem_fallback = []  # used only when no DB is configured
 _qa_pgvector = None    # None=untried, True/False once probed
 
@@ -418,7 +420,7 @@ def _qa_recall_pg(scope, vec):
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(
                     "SELECT question, answer, 1 - (embedding_vec <=> %s::vector) AS sim "
-                    "FROM qa_memory WHERE scope=%s AND embedding_vec IS NOT NULL "
+                    "FROM qa_memory WHERE (scope=%s OR scope='global') AND embedding_vec IS NOT NULL "
                     "ORDER BY embedding_vec <=> %s::vector LIMIT %s",
                     (qs, scope, qs, QA_RECALL_TOPK))
                 rows = cur.fetchall()
@@ -482,7 +484,7 @@ def _qa_recall(scope, vec):
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 _qa_ensure(cur)
                 cur.execute(
-                    "SELECT question, answer, embedding FROM qa_memory WHERE scope=%s "
+                    "SELECT question, answer, embedding FROM qa_memory WHERE (scope=%s OR scope='global') "
                     "ORDER BY created_at DESC LIMIT %s", (scope, QA_RECALL_FETCH))
                 rows = cur.fetchall()
             conn.commit()
@@ -2782,6 +2784,49 @@ def debug_artwork():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "bot": BOT_NAME, "bot_open_id": BOT_OPEN_ID or "loading", "version": "4.12"})
+
+@app.route("/seed-qa", methods=["POST"])
+def seed_qa():
+    """Pre-load canonical Q&A pairs into the bot's permanent memory.
+
+    Optional. Gated by the SEED_TOKEN env var (503 if unset). Body JSON:
+      {"scope": "global", "items": [{"q": "...", "a": "..."}, ...]}
+    scope defaults to "global" so seeded answers are recalled in every chat.
+    Each pair is embedded with the same model used for retrieval and stored in
+    qa_memory, so it surfaces through the normal past-answer recall path. This
+    is for pinning canonical answers; ordinary wiki/doc content is already
+    covered by the RAG index and does NOT need seeding here.
+    """
+    if not SEED_TOKEN:
+        return jsonify({"status": "disabled", "message": "SEED_TOKEN not set"}), 503
+    body = request.get_json(silent=True) or {}
+    token = (request.headers.get("X-Seed-Token", "") or body.get("token", "")).strip()
+    if token != SEED_TOKEN:
+        return jsonify({"status": "unauthorized"}), 401
+    scope = (body.get("scope") or "global").strip()
+    items = body.get("items") or []
+    stored = skipped = 0
+    errors = []
+    for it in items:
+        q = (it.get("q") or it.get("question") or "").strip()
+        a = (it.get("a") or it.get("answer") or "").strip()
+        if not (q and a):
+            skipped += 1
+            continue
+        try:
+            retrieval.retrieve(q)  # embeds q via the retrieval embedder
+            vec = retrieval.last_query_vector()
+            if not vec:
+                skipped += 1
+                errors.append(f"no-embedding: {q[:60]}")
+                continue
+            _qa_store(scope, q, a, vec)
+            stored += 1
+        except Exception as e:  # noqa: BLE001
+            skipped += 1
+            errors.append(f"{q[:40]}: {str(e)[:80]}")
+    return jsonify({"status": "ok", "scope": scope, "stored": stored,
+                    "skipped": skipped, "errors": errors[:10]})
 
 @app.route("/test-google-briefing", methods=["GET"])
 def test_google_briefing():
