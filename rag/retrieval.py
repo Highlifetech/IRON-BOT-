@@ -35,11 +35,37 @@ def last_query_vector():
     return _last_vec
 
 
+def reload():
+    """Drop the cached store, embedder, and query cache so the NEXT retrieve()
+    reloads the freshly rebuilt index from disk. Called by the auto-refresh
+    thread after an incremental ingest completes."""
+    global _store, _embedder, _last_query, _last_hits, _last_vec
+    old = _store
+    _store = None
+    _embedder = None
+    _last_query = None
+    _last_hits = None
+    _last_vec = None
+    try:
+        if old is not None:
+            old.close()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("retrieval cache cleared; fresh index will load on next query")
+
+
 def _ensure_loaded():
     global _store, _embedder
     if _store is None:
         _store = VectorStore()
         _embedder = get_embedder()
+    # Start the background index auto-refresh once, inside the live web process.
+    # Fully guarded: a problem here must never break retrieval.
+    try:
+        from . import auto_refresh
+        auto_refresh.ensure_started()
+    except Exception:  # noqa: BLE001
+        pass
     return _store, _embedder
 
 
