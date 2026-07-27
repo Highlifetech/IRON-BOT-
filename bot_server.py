@@ -1186,6 +1186,60 @@ def handle_request_update_button(table_id, record_id, requested_by=""):
 # =========================================================================
 # FEATURE 3 - MORNING DIGEST (uses flexible field lookups)
 # =========================================================================
+
+# =========================================================================
+# ARTWORK SUBMISSION -> Approve / Revise workflow
+# =========================================================================
+
+def build_art_review_card(order_num, client, submitted_by, table_id, record_id, image_key="", decision="", decided_by=""):
+    link = record_link(table_id, record_id)
+    action_id = f"art_decision_{table_id}_{record_id}"
+    submitter = submitted_by or "The design team"
+    elements = [{"tag": "markdown", "content": f"Hello Brendan,\n\n{submitter} has submitted artwork for **{order_num}** ({client}). Please review and approve or request a revision."}]
+    if image_key:
+        elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Submitted Artwork"}})
+    open_record_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "Open Record"}, "type": "default", "url": link}
+    if decision or _is_action_clicked(action_id):
+        label = "Approved \u2713" if decision == "approve" else ("Revision Requested" if decision == "revise" else "Reviewed \u2713")
+        done_btn = {"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": "default", "disabled": True}
+        elements.append({"tag": "action", "actions": [done_btn, open_record_btn]})
+        if decided_by:
+            now_str = _est_now().strftime("%I:%M %p ET, %b %d")
+            verb = "Approved" if decision == "approve" else "Revision requested"
+            elements.append({"tag": "markdown", "content": f"{verb} by {decided_by} \u2014 {now_str}"})
+    else:
+        base_val = {"order_num": order_num, "client": client, "table_id": table_id, "record_id": record_id, "image_key": image_key, "submitted_by": submitted_by}
+        approve_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\u2705 Approve"}, "type": "primary", "value": dict(base_val, action=f"art_approve_{table_id}_{record_id}")}
+        revise_btn = {"tag": "button", "text": {"tag": "plain_text", "content": "\U0001F504 Request Revision"}, "type": "danger", "value": dict(base_val, action=f"art_revise_{table_id}_{record_id}")}
+        elements.append({"tag": "action", "actions": [approve_btn, revise_btn, open_record_btn]})
+    header_map = {"approve": ("Artwork Approved", "green"), "revise": ("Artwork Revision Requested", "orange")}
+    title, color = header_map.get(decision, ("Artwork Review", "turquoise"))
+    return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": title}, "template": color}, "elements": elements}
+
+
+def handle_art_review_button(table_id, record_id, requested_by=""):
+    try:
+        record = lark.get_record(table_id, record_id)
+        fields = record.get("fields", {})
+        order_num = get_order_num(fields)
+        client = get_client_name(fields)
+        submitted_by = requested_by or get_project_manager(fields) or "The design team"
+        image_key = get_image_key_from_field(fields)
+        target = URGENT_APPROVALS_CHAT or FOUNDERS_CHAT
+        if not image_key:
+            if target:
+                lark.send_text(f"\u26a0\ufe0f Artwork submitted for {order_num} ({client}) but no file was found in the Production Artwork field. Please upload the artwork to the record and press Submit Art again.", chat_id=target)
+            return {"status": "no-artwork", "order": order_num}
+        card = build_art_review_card(order_num, client, submitted_by, table_id, record_id, image_key)
+        if target:
+            lark.send_card(card, chat_id=target)
+            logger.info(f"Art review card sent for {order_num}")
+        return {"status": "ok", "order": order_num}
+    except Exception as e:
+        logger.error(f"Art review error: {e}")
+        return {"status": "error", "detail": str(e)}
+
+
 def build_morning_digest(projects):
     today = datetime.now(timezone.utc).date()
     status_counts = {}
@@ -1968,6 +2022,47 @@ def handle_card_callback(body):
             lark.send_text(f"\ud83c\udfa8 {operator_name} sent artwork for {order_num}", chat_id=FOUNDERS_CHAT)
         return {"toast": {"type": "success", "content": f"Artwork sent by {operator_name}"}}
 
+    if action_str.startswith("art_approve_") or action_str.startswith("art_revise_"):
+        tid = action_value.get("table_id", "")
+        rid = action_value.get("record_id", "")
+        decision_id = f"art_decision_{tid}_{rid}"
+        if _is_action_clicked(decision_id):
+            return {"toast": {"type": "info", "content": "Already reviewed"}}
+        if not _can_resolve(operator_id, operator_name):
+            return {"toast": {"type": "error", "content": "Only Brendan or Carlo can review artwork."}}
+        _mark_action_clicked(decision_id, operator_name)
+        approve = action_str.startswith("art_approve_")
+        order_num = action_value.get("order_num", "")
+        client = action_value.get("client", "")
+        submitted_by = action_value.get("submitted_by", "")
+        image_key = action_value.get("image_key", "")
+        new_status = "ARTWORK CONFIRMED" if approve else "PENDING ARTWORK"
+        try:
+            record = lark.get_record(tid, rid)
+            lark.update_record_status(record, new_status)
+        except Exception as e:
+            logger.error(f"Art status update failed: {e}")
+        now_str = _est_now().strftime("%I:%M %p ET, %b %d")
+        link = record_link(tid, rid)
+        order_display = f"[{order_num}]({link})" if link else f"**{order_num}**"
+        if approve:
+            msg = f"Hello Hannah, the artwork for {order_display} ({client}) was approved by {operator_name} \u2014 {now_str}. Status set to ARTWORK CONFIRMED."
+            title, color = "\u2705 Artwork Approved", "green"
+        else:
+            msg = f"Hello Hannah, {operator_name} requested a revision on the artwork for {order_display} ({client}) \u2014 {now_str}. Please upload the revised artwork to the record and press Submit Art again."
+            title, color = "\U0001F504 Artwork Revision Requested", "orange"
+        confirm_elements = [{"tag": "markdown", "content": msg}]
+        if image_key:
+            confirm_elements.append({"tag": "img", "img_key": image_key, "custom_width": 360, "alt": {"tag": "plain_text", "content": "Artwork"}})
+        if link:
+            confirm_elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "Open Record"}, "type": "default", "url": link}]})
+        confirm_card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": title}, "template": color}, "elements": confirm_elements}
+        for _c in dict.fromkeys([x for x in [LARK_CHAT_ID_HANNAH_ARTWORK or LARK_CHAT_ID_HANNAH, FOUNDERS_CHAT] if x]):
+            lark.send_card(confirm_card, chat_id=_c)
+        updated_card = build_art_review_card(order_num, client, submitted_by, tid, rid, image_key, decision=("approve" if approve else "revise"), decided_by=operator_name)
+        toast_verb = "Approved" if approve else "Revision requested"
+        return {"toast": {"type": "success", "content": f"{toast_verb} by {operator_name}"}, "card": updated_card}
+
     return {"toast": {"type": "info", "content": "Unknown action"}}
 
 
@@ -2598,6 +2693,14 @@ def card_callback():
         return jsonify({"challenge": body.get("challenge", "")})
     result = handle_card_callback(body)
     return jsonify(result)
+
+
+@app.route("/art-review/<table_id>/<record_id>", methods=["POST", "GET"])
+def art_review_endpoint(table_id, record_id):
+    body = request.get_json(silent=True) or {}
+    requested_by = body.get("requested_by", "")
+    threading.Thread(target=handle_art_review_button, args=(table_id, record_id, requested_by), daemon=True).start()
+    return jsonify({"status": "accepted"})
 
 
 @app.route("/notify/<table_id>/<record_id>", methods=["POST", "GET"])
