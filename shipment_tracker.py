@@ -1,28 +1,46 @@
 """
-HLT Inbound Shipment Tracker
+HLT Inbound Shipment Summary
 
-Runs 3x daily (8am, 1pm, 8pm EST via GitHub Actions).
-Reads the shipment tracking table from Lark Base, checks for
-shipments needing attention (exceptions, customs holds, etc.),
-and sends ONE alert per issue to the HLT INBOUND DELIVERIES chat.
+Posts one short summary of open shipments into the HLT INBOUND DELIVERIES
+chat, and flags anything that needs a person.
 
-Deduplication: Each shipment issue is tracked by writing the current
-status to the "Alerted Status" field on the Lark Base record.
-Once alerted for a given status, it will NOT alert again unless
-the shipment status changes to a different alert-worthy status.
+Where the numbers come from
+---------------------------
+ShipBot's dashboard, over /api/shipments. ShipBot reads the shipping sheets
+and calls UPS, FedEx, USPS and DHL for live carrier status, so it already
+knows what is late and why.
+
+This used to read a Lark Base table instead -- whatever somebody had typed
+into it, with no carrier data behind it. That is how a message like
+
+    Shipment Status Update
+    Sunday, September 13 2026
+    -- Unknown --
+    UPS
+    12345tfw
+
+reached the team chat: one test row, no client, no status, posted as if it
+were a report. There is no second source now, so there is nothing to
+disagree with ShipBot and nothing to type wrong.
+
+The rules this file exists to keep:
+  * never post a shipment with no tracking number, or an obvious test row
+  * never print a heading for an unknown client -- say whose desk it is
+  * lead with what needs attention, and say how late it is
+  * say plainly when the tracker could not be reached, rather than
+    reporting zero shipments as though that were the news
 """
 
-import os
-import sys
-import json
 import logging
-from datetime import datetime, timezone
+import os
+import re
+import sys
+from datetime import datetime
+
+import requests
 
 from lark_client import LarkClient
-from config import (
-    LARK_BASE_APP_TOKEN,
-    LARK_CHAT_ID_HLT_INBOUND,
-)
+from config import LARK_CHAT_ID_HLT_INBOUND
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,301 +52,194 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Field names in the Lark Base shipment table (adjust if yours differ)
-FIELD_TRACKING_NUM      = "Tracking Number"
-FIELD_CARRIER           = "Carrier"
-FIELD_SHIPMENT_STATUS   = "Shipment Status"
-FIELD_CLIENT            = "Client"
-FIELD_BOXES             = "Boxes"
-FIELD_EXPECTED_DELIVERY = "Expected Delivery"
-FIELD_ALERTED_STATUS    = "Alerted Status"
-FIELD_MONTH             = "Month"
-
-# Optional: set LARK_SHIPMENT_TABLE_ID as a GitHub secret to skip keyword search
-LARK_SHIPMENT_TABLE_ID = os.environ.get("LARK_SHIPMENT_TABLE_ID", "")
-LARK_SHIPMENT_TABLE_NAME = os.environ.get("LARK_SHIPMENT_TABLE_NAME", "")
-
-# Statuses that indicate a shipment needs attention
-ALERT_STATUSES = [
-    "exception",
-    "shipment exception",
-    "customs hold",
-    "customs delay",
-    "delivery exception",
-    "returned",
-    "failed delivery",
-    "address issue",
-    "damaged",
-    "lost",
-    "held",
-    "alert",
-]
-
-# Target chat for shipment alerts
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").rstrip("/")
+DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
 INBOUND_CHAT_ID = LARK_CHAT_ID_HLT_INBOUND
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+REQUEST_TIMEOUT = 45          # the dashboard may be warming a snapshot
+MAX_ISSUE_LINES = 12          # a chat message, not a report
 
-def field_to_text(val):
-    """Convert a Lark field value to plain text."""
-    if isinstance(val, list):
-        parts = []
-        for item in val:
-            if isinstance(item, dict):
-                parts.append(item.get("text", item.get("name", str(item))))
-            else:
-                parts.append(str(item))
-        return ", ".join(parts)
-    if isinstance(val, dict):
-        return val.get("text", val.get("name", str(val)))
-    return str(val) if val is not None else ""
+# A tracking number is a carrier's, not something somebody typed to see what
+# would happen. Real ones are long and have no spaces; "12345tfw", "test" and
+# "abc123" are how junk rows announce themselves.
+TEST_PATTERNS = re.compile(
+    r"^(test|testing|abc|xxx|none|n/?a|tbd|\d{1,6}[a-z]{0,4})$", re.I)
 
 
-def needs_attention(status_text):
-    """Return True if the shipment status indicates an issue."""
-    if not status_text:
+def is_real_tracking(tracking):
+    """False for blanks and the obvious hand-typed placeholders."""
+    t = (tracking or "").strip()
+    if len(t) < 8 or " " in t:
         return False
-    lower = status_text.strip().lower()
-    for alert_kw in ALERT_STATUSES:
-        if alert_kw in lower:
-            return True
-    return False
+    return not TEST_PATTERNS.match(t)
 
 
-def is_already_alerted(record):
-    """Check if we already sent an alert for this exact status.
+# ---------------------------------------------------------------------------
+# Reading the dashboard
+# ---------------------------------------------------------------------------
 
-    Returns True if the 'Alerted Status' field matches the current
-    'Shipment Status', meaning we already notified about this issue.
+def fetch_shipments():
+    """Open shipments from ShipBot, or raise with a readable reason."""
+    if not DASHBOARD_URL:
+        raise RuntimeError("DASHBOARD_URL is not set")
+    url = "%s/api/shipments" % DASHBOARD_URL
+    params = {"t": DASHBOARD_TOKEN} if DASHBOARD_TOKEN else {}
+    resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    if resp.status_code in (401, 403):
+        raise RuntimeError("the dashboard refused the token (HTTP %d) -- check "
+                           "DASHBOARD_TOKEN" % resp.status_code)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("shipments") or [], data.get("totals") or {}
+
+
+def pick(s, *names):
+    """First non-empty value among `names`.
+
+    The dashboard has been rebuilt more than once and its field names have
+    moved with it. Reading a few spellings costs nothing; posting a wall of
+    "no reference / Unassigned" because one key was renamed is exactly the
+    kind of message this file exists to stop.
     """
-    fields = record.get("fields", {})
-    alerted = field_to_text(fields.get(FIELD_ALERTED_STATUS, "")).strip().lower()
-    current = field_to_text(fields.get(FIELD_SHIPMENT_STATUS, "")).strip().lower()
-
-    if not alerted:
-        return False  # never alerted before
-
-    return alerted == current
+    for n in names:
+        v = s.get(n)
+        if v not in (None, "", [], {}):
+            return v
+    return ""
 
 
-def mark_as_alerted(lark, table_id, record_id, status_text):
-    """Write the current status to the Alerted Status field so we don't re-alert."""
-    try:
-        lark.update_record_fields(table_id, record_id, {
-            FIELD_ALERTED_STATUS: status_text
-        })
-        logger.info(f"Marked record {record_id} as alerted for: {status_text}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to mark record {record_id} as alerted: {e}")
-        return False
+def usable(shipments):
+    """Drop the rows nobody can act on."""
+    return [s for s in shipments
+            if is_real_tracking(pick(s, "tracking", "tracking_num",
+                                     "tracking_number"))]
 
-# ---------------------------------------------------------------------------
-# Find the shipment tracking table
-# ---------------------------------------------------------------------------
 
-def find_shipment_table(lark, tables):
-    """Find the table that contains shipment/inbound tracking data.
+def who(s):
+    """The client, or failing that whose desk the shipment sits on."""
+    client = str(pick(s, "client", "customer", "client_name")).strip()
+    if client and client.lower() not in ("unassigned", "unknown", "-", "—"):
+        return client
+    owner = str(pick(s, "owner", "section", "assignee")).strip()
+    return owner or "Unassigned"
 
-    First checks the LARK_SHIPMENT_TABLE_ID environment variable.
-    Falls back to searching by keyword in table names.
-    """
-    # Option 1: Use explicit table ID from env var
-    if LARK_SHIPMENT_TABLE_ID:
-        for table in tables:
-            if table["table_id"] == LARK_SHIPMENT_TABLE_ID:
-                logger.info(f"Using configured shipment table: {table['name']} ({table['table_id']})")
-                return table
-        # If not found in list, create a minimal record with just the ID
-        name = LARK_SHIPMENT_TABLE_NAME or LARK_SHIPMENT_TABLE_ID
-        logger.info(f"Using configured shipment table ID: {LARK_SHIPMENT_TABLE_ID}")
-        return {"table_id": LARK_SHIPMENT_TABLE_ID, "name": name}
 
-    # Option 2: Use explicit table name from env var
-    if LARK_SHIPMENT_TABLE_NAME:
-        name_lower = LARK_SHIPMENT_TABLE_NAME.lower()
-        for table in tables:
-            if table.get("name", "").lower() == name_lower:
-                logger.info(f"Found table by name: {table['name']} ({table['table_id']})")
-                return table
+def issue_line(s):
+    """One shipment that needs a person, in the order you read it."""
+    bits = []
+    late = int(pick(s, "overdue_days", "days_late") or 0)
+    if late:
+        bits.append("**%dd late**" % late)
+    bits.append(pick(s, "id", "shipment_id", "order_num", "tracking")
+                or "no reference")
+    bits.append(who(s))
+    detail = str(pick(s, "detail", "status_label", "raw_status",
+                          "current_status")).strip()
+    if detail:
+        bits.append(detail)
+    carrier = str(pick(s, "carrier", "carrier_name")).strip()
+    if carrier and carrier != "—":
+        bits.append(carrier)
+    return "• " + " · ".join(bits)
 
-    # Option 3: Keyword search in table names
-    shipment_keywords = ["shipment", "inbound", "tracking", "delivery", "deliveries"]
-    for table in tables:
-        name_lower = table.get("name", "").lower()
-        for kw in shipment_keywords:
-            if kw in name_lower:
-                logger.info(f"Found shipment table by keyword: {table['name']} ({table['table_id']})")
-                return table
-
-    logger.warning("No shipment table found. Available tables:")
-    for t in tables:
-        logger.warning(f"  - {t['name']} ({t['table_id']})")
-    logger.warning("Tip: Set LARK_SHIPMENT_TABLE_ID or LARK_SHIPMENT_TABLE_NAME as a GitHub secret.")
-    return None
 
 # ---------------------------------------------------------------------------
-# Build the status update message (all active shipments)
+# The message
 # ---------------------------------------------------------------------------
 
-def build_status_message(records_by_client):
-    """Build the full shipment status update message."""
-    now = datetime.now(timezone.utc)
-    lines = [f"**Shipment Status Update**", f"{now.strftime('%A, %B %d %Y')}", ""]
+def build_summary(shipments, totals):
+    """A short status line, then only what needs attention."""
+    now = datetime.now().strftime("%A, %B %-d")
+    def bucket(s):
+        return str(pick(s, "status", "bucket", "state")).lower()
+    flagged = [s for s in shipments if bucket(s) == "flagged"]
+    arriving = [s for s in shipments if bucket(s) == "arriving"]
 
-    for client, records in sorted(records_by_client.items()):
-        lines.append(f"**-- {client} --**")
-        lines.append("")
+    # Worst first -- the five lines that fit are the ones people read.
+    flagged.sort(key=lambda s: -int(pick(s, "overdue_days",
+                                              "days_late") or 0))
 
-        by_carrier = {}
-        for rec in records:
-            fields = rec.get("fields", {})
-            carrier = field_to_text(fields.get(FIELD_CARRIER, "Unknown")).upper()
-            if carrier not in by_carrier:
-                by_carrier[carrier] = []
-            by_carrier[carrier].append(rec)
+    counts = ["%d open" % len(shipments)]
+    if flagged:
+        counts.append("%d need attention" % len(flagged))
+    if arriving:
+        counts.append("%d arriving today" % len(arriving))
 
-        for carrier, carrier_recs in sorted(by_carrier.items()):
-            lines.append(f"*{carrier}*")
-            for rec in carrier_recs:
-                fields   = rec.get("fields", {})
-                tracking = field_to_text(fields.get(FIELD_TRACKING_NUM, ""))
-                boxes    = field_to_text(fields.get(FIELD_BOXES, ""))
-                status   = field_to_text(fields.get(FIELD_SHIPMENT_STATUS, ""))
-                expected = field_to_text(fields.get(FIELD_EXPECTED_DELIVERY, ""))
+    lines = ["**Shipment summary** · %s" % now,
+             " · ".join(counts), ""]
 
-                box_part       = f" [{boxes}]" if boxes else ""
-                status_part    = f" -- {status}" if status else ""
-                expected_part  = (f" -- expected delivery on {expected}"
-                                  if expected and "expect" not in status.lower() else "")
-                exception_flag = " \u26a0\ufe0f" if needs_attention(status) else ""
+    if flagged:
+        lines.append("**Needs attention**")
+        lines += [issue_line(s) for s in flagged[:MAX_ISSUE_LINES]]
+        if len(flagged) > MAX_ISSUE_LINES:
+            lines.append("_+%d more_" % (len(flagged) - MAX_ISSUE_LINES))
+    else:
+        lines.append("Nothing needs attention — everything is moving.")
 
-                lines.append(f"{tracking}{box_part}{status_part}{expected_part}{exception_flag}")
-            lines.append("")
+    if arriving:
+        lines += ["", "**Arriving today**"]
+        lines += ["• %s · %s · %s"
+                  % (pick(s, "id", "shipment_id", "tracking"), who(s),
+                     str(pick(s, "carrier", "carrier_name")).strip())
+                  for s in arriving[:MAX_ISSUE_LINES]]
 
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
-# ---------------------------------------------------------------------------
-# Build the alert message (only NEW shipment issues)
-# ---------------------------------------------------------------------------
-
-def build_alert_message(alert_records):
-    """Build a Shipment Alert card for issues needing attention."""
-    lines = ["**HLT Shipment Alert**", "",
-             "The following shipments need attention:"]
-    for table_name, rec in alert_records:
-        fields   = rec.get("fields", {})
-        carrier  = field_to_text(fields.get(FIELD_CARRIER, "Unknown")).upper()
-        tracking = field_to_text(fields.get(FIELD_TRACKING_NUM, ""))
-        client   = field_to_text(fields.get(FIELD_CLIENT, "Unknown"))
-        month    = field_to_text(fields.get(FIELD_MONTH, ""))
-        status   = field_to_text(fields.get(FIELD_SHIPMENT_STATUS, ""))
-
-        month_tag = f" [{month}]" if month else ""
-        lines.append(f"\u2022 {carrier} | {tracking}{month_tag} | {client} | {status}")
-
-    return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    if not INBOUND_CHAT_ID:
-        logger.error("LARK_CHAT_ID_HLT_INBOUND not set. Cannot send shipment alerts.")
+    dry_run = "--dry-run" in sys.argv
+    if not INBOUND_CHAT_ID and not dry_run:
+        logger.error("LARK_CHAT_ID_HLT_INBOUND not set. Nothing to post to.")
         sys.exit(1)
 
-    lark = LarkClient()
+    lark = None if dry_run else LarkClient()
 
-    logger.info("Discovering tables in Lark Base...")
-    tables = lark.get_all_tables(LARK_BASE_APP_TOKEN)
-    logger.info(f"Found {len(tables)} tables")
-
-    shipment_table = find_shipment_table(lark, tables)
-    if not shipment_table:
-        logger.error("Could not find shipment tracking table. Exiting.")
-        logger.error("Set LARK_SHIPMENT_TABLE_ID or LARK_SHIPMENT_TABLE_NAME as a GitHub secret.")
+    try:
+        shipments, totals = fetch_shipments()
+    except Exception as e:
+        # Say so, rather than posting "0 open" as though that were the news.
+        logger.error("Could not read the shipment dashboard: %s", e)
+        if dry_run:
+            sys.exit(1)
+        lark.send_group_message(
+            "**Shipment summary** — couldn't reach the tracker just now "
+            "(%s). Nothing has changed; I'll try again on the next run."
+            % str(e)[:120],
+            chat_id=INBOUND_CHAT_ID)
         sys.exit(1)
 
-    table_id   = shipment_table["table_id"]
-    table_name = shipment_table["name"]
+    rows = usable(shipments)
+    dropped = len(shipments) - len(rows)
+    if dropped:
+        logger.info("Skipped %d row(s) with no usable tracking number", dropped)
 
-    logger.info(f"Reading records from {table_name}...")
-    records = lark.get_all_records(LARK_BASE_APP_TOKEN, table_id)
-    logger.info(f"Found {len(records)} shipment records")
+    if not rows:
+        logger.info("No open shipments to report.")
+        if dry_run:
+            print("**Shipment summary** - nothing open right now.")
+            return
+        lark.send_group_message(
+            "**Shipment summary** — nothing open right now.",
+            chat_id=INBOUND_CHAT_ID)
+        return
 
-    # ----- Categorize records -----
-    records_by_client = {}
-    alert_records = []
-    seen_tracking = set()  # prevent duplicates within this run
-
-    for rec in records:
-        fields   = rec.get("fields", {})
-        status   = field_to_text(fields.get(FIELD_SHIPMENT_STATUS, "")).strip()
-        tracking = field_to_text(fields.get(FIELD_TRACKING_NUM, "")).strip()
-
-        # Skip records without tracking numbers
-        if not tracking:
-            continue
-
-        # Skip fully delivered shipments
-        if status.lower() == "delivered":
-            continue
-
-        # Group by client for the status update
-        client = field_to_text(fields.get(FIELD_CLIENT, "Unknown")).strip()
-        if client not in records_by_client:
-            records_by_client[client] = []
-        records_by_client[client].append(rec)
-
-        # Check if this shipment needs attention AND hasn't been alerted yet
-        if needs_attention(status) and not is_already_alerted(rec):
-            # Deduplicate within this single run (same tracking number)
-            dedup_key = f"{tracking}|{status.lower()}"
-            if dedup_key not in seen_tracking:
-                seen_tracking.add(dedup_key)
-                alert_records.append((table_name, rec))
-
-    # ----- Step 1: Mark alert records BEFORE sending -----
-    # This prevents duplicates if the workflow runs again before
-    # the records are updated (race condition protection).
-    successfully_marked = []
-    for tname, rec in alert_records:
-        record_id = rec.get("record_id", "")
-        status = field_to_text(rec.get("fields", {}).get(FIELD_SHIPMENT_STATUS, ""))
-        if record_id:
-            if mark_as_alerted(lark, table_id, record_id, status):
-                successfully_marked.append((tname, rec))
-        else:
-            logger.warning(f"Skipping alert for {record_id} — could not mark as alerted")
-
-    # ----- Step 2: Send the full status update -----
-    if records_by_client:
-        status_msg = build_status_message(records_by_client)
-        try:
-            lark.send_group_message(status_msg, chat_id=INBOUND_CHAT_ID)
-            logger.info("Sent shipment status update")
-        except Exception as e:
-            logger.error(f"Failed to send status update: {e}")
-    else:
-        logger.info("No active shipments to report.")
-
-    # ----- Step 3: Send alert ONLY for successfully marked records -----
-    if successfully_marked:
-        alert_msg = build_alert_message(successfully_marked)
-        try:
-            lark.send_alert_card(alert_msg, chat_id=INBOUND_CHAT_ID)
-            logger.info(f"Sent alert for {len(successfully_marked)} shipment issues")
-        except Exception as e:
-            logger.error(f"Failed to send alert: {e}")
-    else:
-        logger.info("No new shipment issues to alert on.")
-
-    logger.info("Done!")
+    message = build_summary(rows, totals)
+    if dry_run:
+        print(message)
+        return
+    try:
+        lark.send_group_message(message, chat_id=INBOUND_CHAT_ID)
+        logger.info("Posted summary: %d open, %d flagged", len(rows),
+                    sum(1 for s in rows
+                        if str(pick(s, "status", "bucket")).lower() == "flagged"))
+    except Exception as e:
+        logger.error("Failed to send the summary: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-
