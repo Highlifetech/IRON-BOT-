@@ -3282,6 +3282,11 @@ def _start_background_tasks():
         logger.error(f"APScheduler setup error: {e}")
 
 
+# Opt-in; existing bot routes and jobs remain unchanged.
+from netsuite_card_push import register as register_netsuite_card_push
+register_netsuite_card_push(app)
+
+
 if __name__ == "__main__":
     _start_background_tasks()
     port = int(os.environ.get("PORT", 8080))
