@@ -1,6 +1,6 @@
 import copy, hashlib, hmac, threading, unittest
 from concurrent.futures import ThreadPoolExecutor
-from netsuite_card_push import authenticate, validate_payload, process, PushError
+from netsuite_card_push import authenticate, validate_payload, process, PushError, card_status, validate_status_payload
 LINE={'identity':'99999999:purchaseorder:10001:101','account':'99999999','destination':'test','poId':'10001','poLineKey':'101','itemId':'1','vendorId':'126','quantity':100,'product':'Beanie','description':'Black patch','units':'Each','poNumber':'PO-EXAMPLE-1','soNumber':'SO-EXAMPLE-1','customer':'Customer','vendor':'Vendor'}
 class Ledger:
     def __init__(self):self.rows={};self.lock=threading.Lock()
@@ -110,5 +110,29 @@ class ShortKeyCompatibilityTests(unittest.TestCase):
         with self.assertRaises(PushError): authenticate(raw,stamp,'0'*64,key,1800000000,allow_short_key=True)
         with self.assertRaises(PushError): authenticate(raw,stamp,sig,key,1800000400,allow_short_key=True)
         with self.assertRaises(PushError): authenticate(raw,stamp,sig,'short',1800000000,allow_short_key=True)
+
+class StatusTests(unittest.TestCase):
+    def setUp(self):self.cards=Cards();self.key=LINE['identity'];self.boards={'test':{}}
+    def test_existing_status_is_read_only(self):
+        self.cards.rows[('test',self.key)]=[{'record_id':'recEXISTING'}]
+        result=card_status(self.key,{'board':'test','record_id':'recEXISTING'},self.cards,self.boards)
+        self.assertEqual(result['status'],'Already in Lark');self.assertEqual(self.cards.creates,0)
+    def test_no_keyed_card_does_not_claim_no_manual_card(self):
+        self.assertEqual(card_status(self.key,None,self.cards,self.boards)['status'],'No linked card');self.assertEqual(self.cards.creates,0)
+    def test_missing_previously_sent_card_requires_review(self):
+        result=card_status(self.key,{'board':'test','record_id':'recEXISTING'},self.cards,self.boards)
+        self.assertIn('Needs review',result['status']);self.assertIsNone(result['url']);self.assertEqual(self.cards.creates,0)
+    def test_changed_ledger_link_is_not_presented_as_matched(self):
+        self.cards.rows[('test',self.key)]=[{'record_id':'recOTHER'}]
+        self.assertIn('link changed',card_status(self.key,{'board':'test','record_id':'recEXISTING'},self.cards,self.boards)['status'])
+    def test_duplicates_across_boards_require_review(self):
+        for board in ['test','other']:self.cards.rows[(board,self.key)]=[{'record_id':'rec'+board}]
+        self.assertIn('multiple',card_status(self.key,None,self.cards,{'test':{},'other':{}})['status'])
+    def test_status_payload_requires_exact_account_keys(self):
+        p={'version':1,'account':'99999999','identities':[self.key]}
+        self.assertEqual(validate_status_payload(p,'99999999'),[self.key])
+        for keys in [[],[self.key,self.key],['other:purchaseorder:10001:101'],['forged']]:
+            with self.assertRaises(PushError):validate_status_payload(dict(p,identities=keys),'99999999')
+        with self.assertRaises(PushError):validate_payload(p,self.boards,'99999999')
 
 if __name__=='__main__':unittest.main()

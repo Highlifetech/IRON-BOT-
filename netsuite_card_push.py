@@ -80,6 +80,13 @@ class PostgresLedger:
                 # Verify expected columns before accepting any request.
                 cur.execute('SELECT identity,board,fingerprint,record_id,created_at,completed_at FROM om_ns_card_push LIMIT 0')
 
+    def lookup_many(self, keys):
+        import psycopg2
+        with closing(psycopg2.connect(self.dsn, connect_timeout=10)) as conn, conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT identity,board,record_id FROM om_ns_card_push WHERE identity = ANY(%s)', (keys,))
+                return {row[0]: {'board': row[1], 'record_id': row[2]} for row in cur.fetchall()}
+
     def reserve(self, key, board, fingerprint):
         import psycopg2
         with closing(psycopg2.connect(self.dsn, connect_timeout=10)) as conn, conn:
@@ -186,6 +193,34 @@ def process(line, ledger, cards):
     return {'identity': key, 'status': 'Created', 'url': cards.url(board, result['record_id'])}
 
 
+def validate_status_payload(payload, account):
+    if not isinstance(payload, dict) or payload.get('version') != 1 or payload.get('account') != account:
+        raise PushError('INVALID_ACCOUNT_OR_VERSION')
+    keys = payload.get('identities')
+    if not isinstance(keys, list) or not 1 <= len(keys) <= 50:
+        raise PushError('INVALID_LINE_COUNT')
+    pattern = re.escape(account) + r':purchaseorder:[1-9][0-9]*:[1-9][0-9]*'
+    if any(not isinstance(key, str) or not re.fullmatch(pattern, key) for key in keys) or len(set(keys)) != len(keys):
+        raise PushError('INVALID_OR_DUPLICATE_IDENTITY')
+    return keys
+
+
+def card_status(key, prior, cards, boards):
+    # Read only: never reserve a key, complete the ledger, create or update a card.
+    if prior and prior['board'] not in boards:
+        return {'identity': key, 'status': 'Needs review — original board unavailable', 'url': None}
+    scope = [prior['board']] if prior else list(boards)
+    matches = [(board, record) for board in scope for record in cards.find(board, key)]
+    if len(matches) > 1:
+        return {'identity': key, 'status': 'Needs review — multiple linked cards', 'url': None}
+    if matches:
+        board, record = matches[0]
+        if prior and prior['record_id'] and prior['record_id'] != record['record_id']:
+            return {'identity': key, 'status': 'Needs review — card link changed', 'url': None}
+        return {'identity': key, 'status': 'Already in Lark', 'url': cards.url(board, record['record_id'])}
+    return {'identity': key, 'status': 'Needs review — previous send unconfirmed' if prior else 'No linked card', 'url': None}
+
+
 def register(app):
     if os.environ.get('OM_CARD_PUSH_ENABLED') != 'true':
         return
@@ -218,6 +253,27 @@ def register(app):
         # Bad optional integration configuration must not interrupt existing bot routes.
         app.logger.error('NetSuite card push disabled: invalid configuration')
         return
+
+    @app.post('/integrations/netsuite/cards/status')
+    def read_netsuite_card_status():
+        if request.content_length is None or request.content_length > 200000:
+            return jsonify(error='INVALID_REQUEST_SIZE'), 413
+        raw = request.get_data()
+        try:
+            authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
+            keys = validate_status_payload(json.loads(raw), os.environ.get('NETSUITE_ACCOUNT_ID'))
+            prior = ledger.lookup_many(keys)
+        except (PushError, ValueError, TypeError):
+            return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
+        except Exception:
+            return jsonify(error='STATUS_UNAVAILABLE'), 503
+        results = []
+        for key in keys:
+            try:
+                results.append(card_status(key, prior.get(key), cards, boards))
+            except Exception:
+                results.append({'identity': key, 'status': 'Status unavailable — check Lark', 'url': None})
+        return jsonify(results=results)
 
     @app.post('/integrations/netsuite/cards')
     def receive_netsuite_cards():
