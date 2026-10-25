@@ -20,9 +20,9 @@ class PushError(Exception):
     pass
 
 
-def authenticate(raw, timestamp, signature, secret, now=None):
+def authenticate(raw, timestamp, signature, secret, now=None, *, allow_short_key=False):
     now = time.time() if now is None else now
-    if not isinstance(secret, str) or len(secret) < 32:
+    if not isinstance(secret, str) or len(secret) < (12 if allow_short_key else 32):
         raise PushError('CONNECTION_NOT_CONFIGURED')
     if len(raw) > 200000 or not re.fullmatch(r'[0-9]{10}', timestamp or ''):
         raise PushError('UNAUTHORIZED')
@@ -192,6 +192,9 @@ def register(app):
         from lark_client import LarkClient
         boards = json.loads(os.environ.get('OM_CARD_PUSH_BOARDS', '{}'))
         catalog = json.loads(os.environ.get('OM_CARD_PUSH_CATALOG', '{}'))
+        allow_short_key = os.environ.get('OM_CARD_PUSH_ALLOW_SHORT_TEST_KEY') == 'true'
+        if allow_short_key and set(boards) != {'test_po'}:
+            raise PushError('INVALID_CONFIGURATION')
         if not isinstance(boards, dict) or not boards or not isinstance(catalog, dict):
             raise PushError('INVALID_CONFIGURATION')
         for key in ('base', 'table', 'po_id_field'):
@@ -203,7 +206,7 @@ def register(app):
             for key in ('identity', 'product', 'description', 'quantity', 'po_relation', 'units'):
                 if not isinstance(board.get('fields', {}).get(key), str) or not board['fields'][key]:
                     raise PushError('INVALID_CONFIGURATION')
-        if not os.environ.get('DATABASE_URL') or len(os.environ.get('OM_CARD_PUSH_SECRET', '')) < 32:
+        if not os.environ.get('DATABASE_URL') or len(os.environ.get('OM_CARD_PUSH_SECRET', '')) < (12 if allow_short_key else 32):
             raise PushError('INVALID_CONFIGURATION')
         # Instantiate bot credentials directly; never a client patched to act as a user.
         cards = LarkCards(LarkClient(), boards, catalog)
@@ -220,7 +223,7 @@ def register(app):
             return jsonify(error='INVALID_REQUEST_SIZE'), 413
         raw = request.get_data()
         try:
-            authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'))
+            authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
             lines = validate_payload(json.loads(raw), boards, os.environ.get('NETSUITE_ACCOUNT_ID'))
         except (PushError, ValueError, TypeError):
             return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400

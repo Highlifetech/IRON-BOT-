@@ -100,4 +100,14 @@ class CatalogTests(unittest.TestCase):
         self.cards.create('test',LINE)
         self.assertEqual(len(self.created),1)
 
+class ShortKeyCompatibilityTests(unittest.TestCase):
+    def test_short_key_requires_explicit_override(self):
+        raw=b'{}'; stamp='1800000000'; key='fictional-key'
+        sig=hmac.new(key.encode(),stamp.encode()+b'.'+raw,hashlib.sha256).hexdigest()
+        with self.assertRaises(PushError): authenticate(raw,stamp,sig,key,1800000000)
+        authenticate(raw,stamp,sig,key,1800000000,allow_short_key=True)
+        with self.assertRaises(PushError): authenticate(raw,stamp,'0'*64,key,1800000000,allow_short_key=True)
+        with self.assertRaises(PushError): authenticate(raw,stamp,sig,key,1800000400,allow_short_key=True)
+        with self.assertRaises(PushError): authenticate(raw,stamp,sig,'short',1800000000,allow_short_key=True)
+
 if __name__=='__main__':unittest.main()
