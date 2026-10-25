@@ -26,11 +26,13 @@ def authenticate(raw, timestamp, signature, secret, now=None, *, allow_short_key
         raise PushError('CONNECTION_NOT_CONFIGURED')
     if len(raw) > 200000 or not re.fullmatch(r'[0-9]{10}', timestamp or ''):
         raise PushError('UNAUTHORIZED')
-    if abs(now - int(timestamp)) > 300 or not re.fullmatch(r'[0-9a-f]{64}', signature or ''):
-        raise PushError('UNAUTHORIZED')
+    if abs(now - int(timestamp)) > 300:
+        raise PushError('SIGNATURE_EXPIRED')
+    if not re.fullmatch(r'[0-9a-f]{64}', signature or ''):
+        raise PushError('SIGNATURE_FORMAT_INVALID')
     expected = hmac.new(secret.encode(), timestamp.encode() + b'.' + raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature):
-        raise PushError('UNAUTHORIZED')
+        raise PushError('SIGNATURE_MISMATCH')
 
 
 def validate_payload(payload, boards, account):
@@ -225,13 +227,18 @@ def register(app):
         try:
             authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
             lines = validate_payload(json.loads(raw), boards, os.environ.get('NETSUITE_ACCOUNT_ID'))
-        except (PushError, ValueError, TypeError):
+        except (PushError, ValueError, TypeError) as error:
+            # Static internal validation codes only; no request, signature or secret logging.
+            reason = str(error) if isinstance(error, PushError) else 'INVALID_JSON_OR_TYPE'
+            app.logger.warning('NetSuite card request rejected: %s', reason)
             return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
         results = []
         for line in lines:
             try:
                 results.append(process(line, ledger, cards))
-            except Exception:
+            except Exception as error:
+                reason = str(error) if isinstance(error, PushError) else type(error).__name__
+                app.logger.warning('NetSuite card send requires review: %s', reason)
                 # Never leak raw API/database errors; a signed retry only reconciles.
                 results.append({'identity': line['identity'], 'status': 'Needs review — send unconfirmed', 'url': None})
         return jsonify(results=results)
