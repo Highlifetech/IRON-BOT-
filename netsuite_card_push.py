@@ -28,10 +28,10 @@ def authenticate(raw, timestamp, signature, secret, now=None, *, allow_short_key
         raise PushError('UNAUTHORIZED')
     if abs(now - int(timestamp)) > 300:
         raise PushError('SIGNATURE_EXPIRED')
-    if not re.fullmatch(r'[0-9a-f]{64}', signature or ''):
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', signature or ''):
         raise PushError('SIGNATURE_FORMAT_INVALID')
     expected = hmac.new(secret.encode(), timestamp.encode() + b'.' + raw, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
+    if not hmac.compare_digest(expected, signature.lower()):
         raise PushError('SIGNATURE_MISMATCH')
 
 

@@ -60,6 +60,7 @@ class ReceiverTests(unittest.TestCase):
         raw=b'{"version":1}';stamp='1800000000';secret='test-only-secret-'*3
         sig=hmac.new(secret.encode(),stamp.encode()+b'.'+raw,hashlib.sha256).hexdigest()
         authenticate(raw,stamp,sig,secret,1800000000)
+        authenticate(raw,stamp,sig.upper(),secret,1800000000)
         for body,ts,signature,now in [(raw+b' ',stamp,sig,1800000000),(raw,stamp,sig,1800000400),(raw,stamp,'0'*64,1800000000)]:
             with self.assertRaises(PushError):authenticate(body,ts,signature,secret,now)
     def test_all_rows_validated_before_any_write(self):
