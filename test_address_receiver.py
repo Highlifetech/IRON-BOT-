@@ -1,6 +1,7 @@
 import copy,json,sys,time,unittest
 from pathlib import Path
 from contextlib import contextmanager
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).parent/'iron-bot-current'))
 from test_netsuite_card_review import Service,L
 from address_receiver import AddressService,validate_choice,PushError,address_matches
@@ -74,6 +75,36 @@ class AddressTests(unittest.TestCase):
         self.review.read=read
         with self.assertRaisesRegex(PushError,'COPY_UNCONFIRMED'):self.apply()
         self.assertEqual(self.review.store.tokens[self.preview['token']][6],'applying')
+    def test_throttled_verification_retries_read_without_repeating_write(self):
+        original=self.review.read; failures=[]
+        def read(*args):
+            if self.review.writes and len(failures)<2:
+                failures.append(True)
+                raise PushError('LINKED_RECORD_READ_FAILED_1254290')
+            return original(*args)
+        self.review.read=read
+        with patch('address_receiver.time.sleep') as sleep:
+            self.assertIn('Address copied',self.apply()['status'])
+        self.assertEqual(len(self.review.writes),1)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list],[1,2])
+    def test_exhausted_read_throttle_keeps_uncertain_write_guard(self):
+        original=self.review.read
+        def read(*args):
+            if self.review.writes:raise PushError('LINKED_RECORD_READ_FAILED_1254290')
+            return original(*args)
+        self.review.read=read
+        with patch('address_receiver.time.sleep') as sleep:
+            with self.assertRaisesRegex(PushError,'1254290'):self.apply()
+        self.assertEqual(sleep.call_count,3)
+        self.assertEqual(len(self.review.writes),1)
+        with self.assertRaisesRegex(PushError,'UNCONFIRMED'):self.apply()
+        self.assertEqual(len(self.review.writes),1)
+    def test_permission_error_is_not_retried(self):
+        def read(*args):raise PushError('LINKED_RECORD_READ_FAILED_1254302')
+        self.review.read=read
+        with patch('address_receiver.time.sleep') as sleep:
+            with self.assertRaisesRegex(PushError,'1254302'):self.apply()
+        sleep.assert_not_called();self.assertEqual(self.review.writes,[])
     def test_missing_or_unrelated_sources_rejected(self):
         for c in (dict(CHOICE,id='999999'),dict(CHOICE,type='vendor'),dict(CHOICE,address=''),dict(CHOICE,status='MULTIPLE_DESTINATIONS_REQUIRE_REVIEW')):
             with self.assertRaises(PushError):validate_choice(L,c)

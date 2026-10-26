@@ -53,11 +53,22 @@ class AddressService:
                 source_hash text NOT NULL, before_state jsonb NOT NULL, proposal jsonb NOT NULL,
                 expires_at bigint NOT NULL, state text NOT NULL DEFAULT 'prepared', applied_at timestamptz)''')
 
+    def read(self, board, record_id):
+        # Lark may rate-limit an immediate verification read after a write.
+        # Retry only that explicitly rejected read; never repeat a write.
+        for delay in (1, 2, 4, None):
+            try:
+                return self.review.read(board, record_id)
+            except PushError as error:
+                if str(error) != 'LINKED_RECORD_READ_FAILED_1254290' or delay is None:
+                    raise
+                time.sleep(delay)
+
     def current(self, cur, line):
         prior=self.review.target(cur,line)
         if prior['board']!=line['destination']:raise PushError('ADDRESS_BOARD_CHANGED')
         if prior.get('variant_id'): raise PushError('GROUPED_ADDRESS_REQUIRES_REVIEW')
-        card=self.review.read(prior['board'],prior['record_id'])
+        card=self.read(prior['board'],prior['record_id'])
         self.review.verify_target(prior,line,card,None)
         cfg=self.cfg(prior['board'])
         before={'managed':self.review.managed(prior['board'],card),
@@ -99,7 +110,7 @@ class AddressService:
             patch={cfg['address']:choice['address'],cfg['source']:source,cfg['copied_at']:stamp}
             cur.execute("UPDATE om_ns_address_reviews SET state='applying' WHERE token=%s",(token,));cur.connection.commit()
             self.review.patch(p['board'],p['record_id'],patch)
-            saved=self.review.read(p['board'],p['record_id']).get('fields',{})
+            saved=self.read(p['board'],p['record_id']).get('fields',{})
             link=saved.get(cfg['source'])
             checks=(address_matches(saved.get(cfg['address']),choice['address']),isinstance(link,dict) and link.get('link')==source['link'],saved.get(cfg['copied_at'])==stamp)
             if not all(checks):
