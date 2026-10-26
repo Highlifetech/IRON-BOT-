@@ -345,6 +345,7 @@ class ReviewService:
 
     def group(self, lines, group, actor):
         lines = validate_group(lines, group)
+        if any(l.get('soShipTo')!=lines[0].get('soShipTo') for l in lines): raise PushError('GROUP_ADDRESS_MISMATCH')
         board = lines[0]['destination']; config = self.cfg(board)
         if not config.get('variants'): raise PushError('VARIANTS_NOT_CONFIGURED')
         keys = [l['identity'] for l in lines]
@@ -386,7 +387,8 @@ class ReviewService:
             for line, vid in created:
                 self.store.save(cur, line['identity'], board, rid, line, vid, actor)
                 cur.execute('UPDATE om_ns_card_push SET record_id=%s,completed_at=now() WHERE identity=%s AND record_id IS NULL', (rid, line['identity']))
-        return [{'identity': k, 'status': 'Created variant card', 'url': self.cards.url(board, rid)} for k in keys]
+        from netsuite_card_push import so_address_status
+        return [{'identity': k, 'status': 'Created variant card', 'addressStatus':so_address_status(lines[0]), 'url': self.cards.url(board, rid)} for k in keys]
 
 
 def register_routes(app, service, authorize):

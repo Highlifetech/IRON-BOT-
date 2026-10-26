@@ -35,6 +35,41 @@ def authenticate(raw, timestamp, signature, secret, now=None, *, allow_short_key
         raise PushError('SIGNATURE_MISMATCH')
 
 
+def validate_so_ship_to(line):
+    value = line.get('soShipTo')
+    if value is None:
+        return None  # Compatibility with already-open sender pages.
+    if not isinstance(value, dict) or set(value) != {'soId','soNumber','status','address'}:
+        raise PushError('INVALID_SO_SHIP_TO')
+    status = value.get('status')
+    if status not in {'AVAILABLE','NO_LINKED_SO','MULTIPLE_DESTINATIONS','ADDRESS_MISSING','ADDRESS_TOO_LONG'}:
+        raise PushError('INVALID_SO_SHIP_TO')
+    if value['soId'] != line.get('soId') or value['soNumber'] != line.get('soNumber'):
+        raise PushError('SO_SHIP_TO_RELATION_CHANGED')
+    address = value.get('address')
+    if not isinstance(address,str) or len(address)>10000:
+        raise PushError('INVALID_SO_SHIP_TO')
+    if status == 'NO_LINKED_SO':
+        if value['soId'] or value['soNumber'] or address:
+            raise PushError('INVALID_SO_SHIP_TO')
+    else:
+        if not isinstance(value['soId'],str) or not re.fullmatch(r'[1-9][0-9]*',value['soId']) or not isinstance(value['soNumber'],str) or not value['soNumber'].strip():
+            raise PushError('INVALID_SO_SHIP_TO')
+        if (status == 'AVAILABLE' and not address.strip()) or (status != 'AVAILABLE' and address):
+            raise PushError('INVALID_SO_SHIP_TO')
+    return value
+
+
+def so_address_status(line):
+    value = validate_so_ship_to(line)
+    if value is None: return 'Address not included by sender'
+    return {'AVAILABLE':'SO shipping address included',
+            'NO_LINKED_SO':'Address needs review — no linked SO',
+            'MULTIPLE_DESTINATIONS':'Address needs review — SO has multiple destinations',
+            'ADDRESS_MISSING':'Address needs review — SO Ship To is blank',
+            'ADDRESS_TOO_LONG':'Address needs review — SO Ship To exceeds the field limit'}[value['status']]
+
+
 def validate_payload(payload, boards, account):
     if not isinstance(payload, dict) or payload.get('version') != 1 or payload.get('account') != account:
         raise PushError('INVALID_ACCOUNT_OR_VERSION')
@@ -60,6 +95,7 @@ def validate_payload(payload, boards, account):
         for field in ('product', 'description', 'units', 'poNumber', 'soNumber', 'customer', 'vendor'):
             if not isinstance(line.get(field), str) or len(line[field]) > 20000:
                 raise PushError('INVALID_TEXT')
+        validate_so_ship_to(line)
         if not line['product'].strip():
             raise PushError('MISSING_PRODUCT')
     return lines
@@ -110,6 +146,7 @@ class LarkCards:
     def __init__(self, client, boards, catalog):
         self.client, self.boards, self.catalog = client, boards, catalog
         self.review_config = {}
+        self.address_config = {}
 
     def search(self, base, table, field, value):
         path = f'/open-apis/bitable/v1/apps/{base}/tables/{table}/records/search'
@@ -168,6 +205,16 @@ class LarkCards:
         fields = {f['identity']: line['identity'], f['product']: line['product'],
                   f['description']: line['description'], f['quantity']: line['quantity'],
                   f['po_relation']: [master['record_id']], f['units']: line['units']}
+        ship_to = validate_so_ship_to(line)
+        if ship_to and ship_to['status']=='AVAILABLE':
+            cfg = self.address_config.get(board)
+            if not cfg: raise PushError('ADDRESS_FIELDS_NOT_CONFIGURED')
+            account = line['account']
+            if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
+            fields.update({cfg['address']:ship_to['address'],
+                           cfg['source']:{'text':ship_to['soNumber']+' — Ship To',
+                             'link':f"https://{account.lower().replace('_','-')}.app.netsuite.com/app/accounting/transactions/salesord.nl?id={ship_to['soId']}"},
+                           cfg['copied_at']:int(time.time()*1000)})
         # SO/customer/vendor are lookups through the existing master relation.
         # No write to production stage, shipments, approval, artwork or dates.
         result = self.client.create_record(b['table'], fields, app_token=b['base'])
@@ -209,7 +256,7 @@ def process(line, ledger, cards):
         return {'identity': key, 'status': 'Needs review — prior send unconfirmed', 'url': None}
     result = cards.create(board, line)
     ledger.complete(key, result['record_id'])
-    return {'identity': key, 'status': 'Created', 'url': cards.url(board, result['record_id'])}
+    return {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
 
 
 def validate_status_payload(payload, account):
@@ -301,6 +348,7 @@ def register(app):
                     raise PushError('INVALID_ADDRESS_CONFIGURATION')
                 address_service=AddressService(review,address_config)
                 address_service.initialize()
+                cards.address_config=address_config
                 register_address_routes(app,address_service,authorize)
         except Exception:
             app.logger.error('NetSuite review extension disabled: invalid configuration')

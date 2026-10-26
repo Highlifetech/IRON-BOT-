@@ -135,4 +135,40 @@ class StatusTests(unittest.TestCase):
             with self.assertRaises(PushError):validate_status_payload(dict(p,identities=keys),'99999999')
         with self.assertRaises(PushError):validate_payload(p,self.boards,'99999999')
 
+
+class AddressImportTests(CatalogTests):
+    def setUp(self):
+        super().setUp()
+        self.cards.address_config={'test':{'address':'Address','source':'Address source','copied_at':'Address copied at'}}
+        self.line=dict(LINE,soId='20001',soShipTo={'soId':'20001','soNumber':LINE['soNumber'],'status':'AVAILABLE','address':'Example warehouse\nExample city'})
+    def test_address_added_to_same_create_request(self):
+        self.cards.create('test',self.line)
+        self.assertEqual(len(self.created),1)
+        f=self.created[0]
+        self.assertEqual(f['Address'],self.line['soShipTo']['address'])
+        self.assertIn('salesord.nl?id=20001',f['Address source']['link'])
+        self.assertIsInstance(f['Address copied at'],int)
+    def test_missing_address_does_not_invent_or_write_blank(self):
+        for status in ['ADDRESS_MISSING','MULTIPLE_DESTINATIONS','ADDRESS_TOO_LONG']:
+            line=copy.deepcopy(self.line);line['soShipTo'].update(status=status,address='')
+            self.cards.create('test',line)
+            self.assertNotIn('Address',self.created[-1])
+    def test_invalid_address_fails_before_create(self):
+        for change in [{'soId':'999'},{'address':''},{'address':'x'*10001},{'status':'guess'},{'soNumber':'OTHER'}]:
+            line=copy.deepcopy(self.line);line['soShipTo'].update(change)
+            with self.assertRaises(PushError):self.cards.create('test',line)
+        self.assertEqual(self.created,[])
+    def test_mapping_missing_fails_before_create(self):
+        self.cards.address_config={}
+        with self.assertRaises(PushError):self.cards.create('test',self.line)
+        self.assertEqual(self.created,[])
+    def test_payload_checks_every_address_before_writes(self):
+        line=copy.deepcopy(self.line);line['soShipTo']['soId']='999'
+        with self.assertRaises(PushError):validate_payload({'version':1,'account':LINE['account'],'lines':[line]}, {'test':{}},LINE['account'])
+    def test_resending_address_change_never_writes_existing_card(self):
+        ledger=Ledger();cards=Cards();process(self.line,ledger,cards)
+        self.line['soShipTo']['address']='Changed warehouse'
+        result=process(self.line,ledger,cards)
+        self.assertIn('source changed',result['status']);self.assertEqual(cards.creates,1)
+
 if __name__=='__main__':unittest.main()
