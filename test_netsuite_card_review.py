@@ -72,6 +72,27 @@ class ReviewTests(unittest.TestCase):
     def test_changed_netsuite_source_stops_apply(self):
         with self.assertRaisesRegex(PushError,'SOURCE_OR'):self.s.apply(dict(L,quantity=200),'actor','TOKEN')
         self.assertEqual(self.s.writes,[])
+    def test_numeric_text_readback_confirms_without_changing_quantity(self):
+        original=self.s.read
+        def read(b,r,variant=False):
+            record=original(b,r,variant)
+            if self.s.writes: record['fields']['Ordered']='100.0'
+            return record
+        self.s.read=read
+        self.assertEqual(self.s.apply(L,'actor','TOKEN')['status'],'Updated from NetSuite')
+        self.assertEqual(self.s.store.tokens['TOKEN'][6],'complete')
+    def test_bad_quantity_readback_stops_before_baseline(self):
+        for bad in (None,'','99','100 units','1,00','NaN','Infinity',True):
+            with self.subTest(bad=bad):
+                service=Service();service.token();original=service.read
+                def read(b,r,variant=False):
+                    record=original(b,r,variant)
+                    if service.writes:record['fields']['Ordered']=bad
+                    return record
+                service.read=read
+                with self.assertRaisesRegex(PushError,'UPDATE_UNCONFIRMED'):service.apply(L,'actor','TOKEN')
+                self.assertEqual(service.store.saved,[])
+                self.assertEqual(service.store.tokens['TOKEN'][6],'applying')
     def test_changed_lark_value_requires_new_review(self):
         self.s.card['fields']['Description']='Team edited this'
         with self.assertRaisesRegex(PushError,'LARK_CHANGED'):self.s.apply(L,'actor','TOKEN')

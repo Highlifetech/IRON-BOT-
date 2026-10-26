@@ -9,6 +9,7 @@ import math
 import re
 import secrets
 import time
+from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager, closing
 from netsuite_card_push import PushError, validate_payload
 
@@ -25,6 +26,18 @@ def text(value):
     if isinstance(value, list):
         return ''.join(str(x.get('text', '')) for x in value if isinstance(x, dict))
     return '' if value is None else str(value)
+
+def value_matches(actual, expected):
+    """Compare readback without treating blank, malformed or different quantities as equal."""
+    if isinstance(expected, str): return text(actual) == expected
+    if type(expected) in (int, float):
+        if type(actual) not in (int, float, str): return False
+        if isinstance(actual, str) and not re.fullmatch(r'-?\d+(?:\.\d+)?', actual): return False
+        try:
+            observed, wanted = Decimal(str(actual)), Decimal(str(expected))
+            return observed.is_finite() and wanted.is_finite() and observed == wanted
+        except InvalidOperation: return False
+    return actual == expected
 
 def relation_ids(value):
     """Normalize Lark list and expanded relation responses; reject unknown shapes."""
@@ -296,8 +309,7 @@ class ReviewService:
             verify = self.read(p['board'], p['variant_id'] or p['record_id'], bool(p['variant_id']))
             for field, expected in p['fields'].items():
                 actual_value = verify.get('fields', {}).get(field)
-                if isinstance(expected, str): actual_value = text(actual_value)
-                if actual_value != expected: raise PushError('UPDATE_UNCONFIRMED')
+                if not value_matches(actual_value, expected): raise PushError('UPDATE_UNCONFIRMED')
             self.store.save(cur, key, p['board'], p['record_id'], line, p['variant_id'], actor)
             prior={'board':p['board'],'record_id':p['record_id'],'variant_id':p['variant_id']}
             issue=self.issue(cur,prior,line)
