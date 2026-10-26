@@ -1,6 +1,6 @@
 import copy, json, time, unittest
 from contextlib import contextmanager
-from netsuite_card_review import ReviewService, snapshot, digest, validate_group, validate_observation, PushError
+from netsuite_card_review import ReviewService, snapshot, digest, validate_group, validate_observation, relation_ids, PushError
 from test_netsuite_card_push import LINE
 
 L=dict(LINE,closed=False,orderStatus='Pending Receipt')
@@ -45,6 +45,24 @@ class Service(ReviewService):
 
 class ReviewTests(unittest.TestCase):
     def setUp(self):self.s=Service();self.s.token()
+    def test_expanded_empty_relation_is_not_manual_variants(self):
+        self.s.config=copy.deepcopy(CONFIG);self.s.config['test']['variants_relation']='Variants'
+        self.s.card['fields']['Variants']=[{'record_ids':None,'table_id':'variants','text':None,'text_arr':[],'type':'text'}]
+        self.s.card['fields']['PO']=[{'record_ids':['recPO'],'table_id':'catalog','text':'PO example','type':'text'}]
+        self.s.token();self.assertEqual(self.s.apply(L,'actor','TOKEN')['status'],'Updated from NetSuite')
+    def test_expanded_populated_relation_still_blocks_manual_variants(self):
+        self.s.config=copy.deepcopy(CONFIG);self.s.config['test']['variants_relation']='Variants'
+        self.s.card['fields']['Variants']=[{'record_ids':['recV'],'table_id':'variants','type':'text'}]
+        self.s.token()
+        with self.assertRaisesRegex(PushError,'MANUAL_VARIANTS'):self.s.apply(L,'actor','TOKEN')
+        self.assertEqual(self.s.writes,[])
+    def test_expanded_variant_backlink_is_verified(self):
+        self.s.variant['fields']['Product']=[{'record_ids':['rec1'],'table_id':'cards','type':'text'}]
+        self.s.token(variant=True);self.assertEqual(self.s.apply(L,'actor','TOKEN')['status'],'Updated from NetSuite')
+    def test_unknown_or_multiple_relation_values_are_not_ignored(self):
+        for value in ({},[{}],[{'record_ids':'recPO'}],[{'record_ids':[None]}]):
+            with self.assertRaises(PushError):relation_ids(value)
+        self.assertEqual(relation_ids([{'record_ids':['recPO','recOTHER']}]),['recPO','recOTHER'])
     def test_explicit_apply_preserves_production_and_files(self):
         self.assertEqual(self.s.apply(L,'actor','TOKEN')['status'],'Updated from NetSuite')
         self.assertEqual(self.s.card['fields']['Ordered'],100)

@@ -26,6 +26,24 @@ def text(value):
         return ''.join(str(x.get('text', '')) for x in value if isinstance(x, dict))
     return '' if value is None else str(value)
 
+def relation_ids(value):
+    """Normalize Lark list and expanded relation responses; reject unknown shapes."""
+    if value is None: return []
+    if not isinstance(value, list): raise PushError('UNRECOGNIZED_RELATION_VALUE')
+    result=[]
+    for entry in value:
+        if isinstance(entry, str): entries=[entry]
+        elif isinstance(entry, dict) and 'record_ids' in entry:
+            entries=entry['record_ids']
+            if entries is None: entries=[]
+            if not isinstance(entries,list): raise PushError('UNRECOGNIZED_RELATION_VALUE')
+        elif isinstance(entry,dict) and 'record_id' in entry: entries=[entry['record_id']]
+        else: raise PushError('UNRECOGNIZED_RELATION_VALUE')
+        if any(not isinstance(r,str) or not re.fullmatch(r'rec[A-Za-z0-9]+',r) for r in entries):
+            raise PushError('UNRECOGNIZED_RELATION_VALUE')
+        result.extend(entries)
+    return result
+
 def validate_observation(payload, boards, account):
     # Closed lines must remain reviewable. They cannot be newly created.
     clean = dict(payload)
@@ -199,16 +217,15 @@ class ReviewService:
     def verify_target(self,prior,line,card,variant):
         board=prior['board'];f=self.cards.boards[board]['fields'];cfg=self.cfg(board)
         fields=card.get('fields',{})
-        def ids(value):return [x.get('record_id') if isinstance(x,dict) else x for x in (value or [])]
         if variant:
             v=cfg['variants'];vf=variant.get('fields',{})
-            if text(vf.get(v['identity']))!=line['identity'] or ids(vf.get(v['parent']))!=[prior['record_id']]:
+            if text(vf.get(v['identity']))!=line['identity'] or relation_ids(vf.get(v['parent']))!=[prior['record_id']]:
                 raise PushError('VARIANT_LINK_CHANGED_REVIEW_REQUIRED')
         else:
             if text(fields.get(f['identity']))!=line['identity']: raise PushError('CARD_IDENTITY_CHANGED')
-            if cfg.get('variants_relation') and fields.get(cfg['variants_relation']): raise PushError('MANUAL_VARIANTS_REQUIRE_REVIEW')
+            if cfg.get('variants_relation') and relation_ids(fields.get(cfg['variants_relation'])): raise PushError('MANUAL_VARIANTS_REQUIRE_REVIEW')
         master=self.cards.master(board,line)
-        if ids(fields.get(f['po_relation']))!=[master['record_id']]: raise PushError('CARD_PO_RELATION_CHANGED')
+        if relation_ids(fields.get(f['po_relation']))!=[master['record_id']]: raise PushError('CARD_PO_RELATION_CHANGED')
 
     def prepare(self, line, actor, observe=False):
         with self.store.transaction(line['account']+':'+line['poId']) as cur:
@@ -339,7 +356,7 @@ class ReviewService:
             if text(verify.get(v['identity']))!=line['identity'] or text(verify.get(v['size']))!=size[line['identity']] or verify.get(v['quantity'])!=line['quantity']:
                 raise PushError('VARIANT_CREATE_UNCONFIRMED')
             parent=verify.get(v['parent'],[])
-            if [x.get('record_id') if isinstance(x,dict) else x for x in parent]!=[rid]: raise PushError('VARIANT_PARENT_UNCONFIRMED')
+            if relation_ids(parent)!=[rid]: raise PushError('VARIANT_PARENT_UNCONFIRMED')
             created.append((line, variant['record_id']))
         self.patch(board, rid, self.metadata(board, lines[0], True))
         with self.store.transaction(lines[0]['account']+':'+lines[0]['poId']) as cur:
