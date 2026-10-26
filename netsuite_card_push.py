@@ -84,8 +84,8 @@ class PostgresLedger:
         import psycopg2
         with closing(psycopg2.connect(self.dsn, connect_timeout=10)) as conn, conn:
             with conn.cursor() as cur:
-                cur.execute('SELECT identity,board,record_id FROM om_ns_card_push WHERE identity = ANY(%s)', (keys,))
-                return {row[0]: {'board': row[1], 'record_id': row[2]} for row in cur.fetchall()}
+                cur.execute('SELECT identity,board,record_id,fingerprint FROM om_ns_card_push WHERE identity = ANY(%s)', (keys,))
+                return {row[0]: {'board': row[1], 'record_id': row[2], 'fingerprint':row[3]} for row in cur.fetchall()}
 
     def reserve(self, key, board, fingerprint):
         import psycopg2
@@ -109,6 +109,7 @@ class PostgresLedger:
 class LarkCards:
     def __init__(self, client, boards, catalog):
         self.client, self.boards, self.catalog = client, boards, catalog
+        self.review_config = {}
 
     def search(self, base, table, field, value):
         path = f'/open-apis/bitable/v1/apps/{base}/tables/{table}/records/search'
@@ -125,9 +126,20 @@ class LarkCards:
 
     def find(self, board, key):
         b = self.boards[board]
-        return self.search(b['base'], b['table'], b['fields']['identity'], key)
+        rows = self.search(b['base'], b['table'], b['fields']['identity'], key)
+        v = self.review_config.get(board, {}).get('variants')
+        if rows or not v: return rows
+        variants = self.search(b['base'], v['table'], v['identity'], key)
+        if not variants: return []
+        parent = variants[0].get('fields',{}).get(v['parent'],[])
+        if len(parent)!=1: raise PushError('VARIANT_PARENT_REQUIRES_REVIEW')
+        rid = parent[0].get('record_id') if isinstance(parent[0],dict) else parent[0]
+        if not isinstance(rid,str) or not re.fullmatch(r'rec[A-Za-z0-9]+',rid): raise PushError('INVALID_VARIANT_PARENT')
+        response = self.client._get(f"/open-apis/bitable/v1/apps/{b['base']}/tables/{b['table']}/records/{rid}")
+        if response.get('code')!=0: raise PushError('VARIANT_PARENT_UNAVAILABLE')
+        return [response['data']['record']]
 
-    def create(self, board, line):
+    def master(self, board, line):
         b, c = self.boards[board], self.catalog
         master = self.search(c['base'], c['table'], c['po_id_field'], line['poId'])
         if len(master) != 1:
@@ -147,10 +159,15 @@ class LarkCards:
             raise PushError('MASTER_CUSTOMER_REQUIRES_REVIEW')
         if b['base'] != c['base']:
             raise PushError('CROSS_BASE_RELATION_NOT_CONFIGURED')
+        return master[0]
+
+    def create(self, board, line):
+        b = self.boards[board]
+        master = self.master(board, line)
         f = b['fields']
         fields = {f['identity']: line['identity'], f['product']: line['product'],
                   f['description']: line['description'], f['quantity']: line['quantity'],
-                  f['po_relation']: [master[0]['record_id']], f['units']: line['units']}
+                  f['po_relation']: [master['record_id']], f['units']: line['units']}
         # SO/customer/vendor are lookups through the existing master relation.
         # No write to production stage, shipments, approval, artwork or dates.
         result = self.client.create_record(b['table'], fields, app_token=b['base'])
@@ -169,6 +186,8 @@ def process(line, ledger, cards):
     fingerprint = hashlib.sha256(json.dumps(source, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     owned, prior = ledger.reserve(key, requested, fingerprint)
     board = prior['board']
+    if prior['fingerprint'].startswith('group:') and not prior['record_id']:
+        return {'identity':key,'status':'Needs review — variant group unconfirmed','url':None}
     # Reconcile at the original destination, even when a retry selects another.
     matches = cards.find(board, key)
     if len(matches) > 1:
@@ -207,6 +226,8 @@ def validate_status_payload(payload, account):
 
 def card_status(key, prior, cards, boards):
     # Read only: never reserve a key, complete the ledger, create or update a card.
+    if prior and prior.get('fingerprint','').startswith('group:') and not prior['record_id']:
+        return {'identity':key,'status':'Needs review — previous send unconfirmed','url':None}
     if prior and prior['board'] not in boards:
         return {'identity': key, 'status': 'Needs review — original board unavailable', 'url': None}
     scope = [prior['board']] if prior else list(boards)
@@ -254,6 +275,30 @@ def register(app):
         app.logger.error('NetSuite card push disabled: invalid configuration')
         return
 
+    review = None
+    if os.environ.get('OM_CARD_REVIEW_CONFIG'):
+        from netsuite_card_review import ReviewService, register_routes
+        try:
+            config = json.loads(os.environ['OM_CARD_REVIEW_CONFIG'])
+            if set(config) != set(boards): raise PushError('INVALID_REVIEW_CONFIGURATION')
+            review = ReviewService(cards, ledger, config)
+            for board in boards: review.cfg(board)
+            review.validate_schema()
+            review.store.initialize()
+            cards.review_config = config
+            def authorize(req):
+                if req.content_length is None or req.content_length > 200000: raise PushError('INVALID_REQUEST_SIZE')
+                raw=req.get_data()
+                authenticate(raw,req.headers.get('X-OM-Timestamp'),req.headers.get('X-OM-Signature'),os.environ.get('OM_CARD_PUSH_SECRET'),allow_short_key=allow_short_key)
+                payload=json.loads(raw)
+                if payload.get('version')!=1 or payload.get('account')!=os.environ.get('NETSUITE_ACCOUNT_ID'): raise PushError('INVALID_ACCOUNT_OR_VERSION')
+                return payload
+            register_routes(app,review,authorize)
+        except Exception:
+            app.logger.error('NetSuite review extension disabled: invalid configuration')
+            review=None
+            cards.review_config={}
+
     @app.post('/integrations/netsuite/cards/status')
     def read_netsuite_card_status():
         if request.content_length is None or request.content_length > 200000:
@@ -282,16 +327,30 @@ def register(app):
         raw = request.get_data()
         try:
             authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
-            lines = validate_payload(json.loads(raw), boards, os.environ.get('NETSUITE_ACCOUNT_ID'))
+            payload=json.loads(raw)
+            lines = validate_payload(payload, boards, os.environ.get('NETSUITE_ACCOUNT_ID'))
+            if any(l.get('closed') is True for l in lines): raise PushError('CLOSED_LINES_CANNOT_BE_CREATED')
         except (PushError, ValueError, TypeError) as error:
             # Static internal validation codes only; no request, signature or secret logging.
             reason = str(error) if isinstance(error, PushError) else 'INVALID_JSON_OR_TYPE'
             app.logger.warning('NetSuite card request rejected: %s', reason)
             return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
+        if payload.get('group'):
+            if not review: return jsonify(error='VARIANTS_NOT_CONFIGURED'),400
+            try:
+                results=review.group(lines,payload['group'],payload.get('actorId',''))
+                bykey={r['identity']:r for r in results}
+                return jsonify(results=[bykey[l['identity']] for l in lines])
+            except Exception:
+                return jsonify(error='GROUP_UNCONFIRMED_REVIEW_BEFORE_RETRY'),409
         results = []
         for line in lines:
             try:
-                results.append(process(line, ledger, cards))
+                result=process(line, ledger, cards)
+                if review and result['status']=='Created':
+                    prior=ledger.lookup_many([line['identity']])[line['identity']]
+                    review.record_creation(line,prior['record_id'],payload.get('actorId',''))
+                results.append(result)
             except Exception as error:
                 reason = str(error) if isinstance(error, PushError) else type(error).__name__
                 app.logger.warning('NetSuite card send requires review: %s', reason)
