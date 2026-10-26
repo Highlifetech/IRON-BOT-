@@ -3,7 +3,7 @@ from pathlib import Path
 from contextlib import contextmanager
 sys.path.insert(0,str(Path(__file__).parent/'iron-bot-current'))
 from test_netsuite_card_review import Service,L
-from address_receiver import AddressService,validate_choice,PushError
+from address_receiver import AddressService,validate_choice,PushError,address_matches
 
 CHOICE={'type':'purchaseorder','id':L['poId'],'number':'PO-EXAMPLE','status':'AVAILABLE','address':'Example Warehouse\n123 Sample Street'}
 CFG={'test':{'address':'Address','source':'Address source','copied_at':'Address copied at'}}
@@ -22,6 +22,10 @@ class Store:
     @contextmanager
     def transaction(self,key):yield Cursor(self)
 class AddressTests(unittest.TestCase):
+    def test_only_crlf_normalization_is_allowed(self):
+        self.assertTrue(address_matches('Warehouse\nStreet','Warehouse\r\nStreet'))
+        for value in ('Warehouse\nOther','Warehouse\nStreet ','Warehouse Street',''):
+            self.assertFalse(address_matches(value,'Warehouse\r\nStreet'))
     def setUp(self):
         self.review=Service();self.review.store=Store()
         self.review.target=lambda cur,line:{'board':'test','record_id':'rec1','variant_id':None}

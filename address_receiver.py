@@ -1,9 +1,14 @@
 """Prepared, opt-in shipping address review. Never edits NetSuite or shipment rows."""
 import json
+import logging
 import re
 import secrets
 import time
 from netsuite_card_review import PushError, digest, snapshot, text
+
+def address_matches(actual, expected):
+    # Lark stores CRLF line endings as LF. Preserve all other text and spacing.
+    return text(actual).replace('\r\n','\n') == expected.replace('\r\n','\n')
 
 def validate_choice(line, choice):
     if not isinstance(choice, dict): raise PushError('INVALID_ADDRESS_SOURCE')
@@ -96,7 +101,9 @@ class AddressService:
             self.review.patch(p['board'],p['record_id'],patch)
             saved=self.review.read(p['board'],p['record_id']).get('fields',{})
             link=saved.get(cfg['source'])
-            if text(saved.get(cfg['address']))!=choice['address'] or not isinstance(link,dict) or link.get('link')!=source['link'] or saved.get(cfg['copied_at'])!=stamp:
+            checks=(address_matches(saved.get(cfg['address']),choice['address']),isinstance(link,dict) and link.get('link')==source['link'],saved.get(cfg['copied_at'])==stamp)
+            if not all(checks):
+                logging.getLogger(__name__).warning('Address readback checks address=%s source=%s timestamp=%s',*checks)
                 raise PushError('ADDRESS_COPY_UNCONFIRMED')
             cur.execute("UPDATE om_ns_address_reviews SET state='complete',applied_at=now() WHERE token=%s",(token,))
             return {'identity':key,'status':'Address copied from '+choice['number'],'url':self.review.cards.url(p['board'],p['record_id'])}
