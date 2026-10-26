@@ -294,6 +294,14 @@ def register(app):
                 if payload.get('version')!=1 or payload.get('account')!=os.environ.get('NETSUITE_ACCOUNT_ID'): raise PushError('INVALID_ACCOUNT_OR_VERSION')
                 return payload
             register_routes(app,review,authorize)
+            if os.environ.get('OM_CARD_ADDRESS_CONFIG'):
+                from address_receiver import AddressService, register_address_routes
+                address_config=json.loads(os.environ['OM_CARD_ADDRESS_CONFIG'])
+                if not isinstance(address_config,dict) or not address_config or not set(address_config).issubset(boards):
+                    raise PushError('INVALID_ADDRESS_CONFIGURATION')
+                address_service=AddressService(review,address_config)
+                address_service.initialize()
+                register_address_routes(app,address_service,authorize)
         except Exception:
             app.logger.error('NetSuite review extension disabled: invalid configuration')
             review=None
