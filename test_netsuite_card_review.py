@@ -114,6 +114,40 @@ class ReviewTests(unittest.TestCase):
     def test_snapshot_detects_item_quantity_closure(self):
         for k,v in [('itemId','9'),('quantity',60),('closed',True)]:self.assertNotEqual(digest(snapshot(L)),digest(snapshot(dict(L,**{k:v}))))
 
+class RecordReadTests(unittest.TestCase):
+    def service(self, responses):
+        s=Service()
+        class Client:
+            token='expired-fixture';token_expires=9999999999
+            def __init__(self):self.calls=[]
+            def _get(self,path):
+                self.calls.append((path,self.token,self.token_expires))
+                value=responses[len(self.calls)-1]
+                if isinstance(value,Exception):raise value
+                return value
+        s.cards.client=Client()
+        return s
+    def test_expired_token_read_refreshes_once(self):
+        s=self.service([{'code':99991677},{'code':0,'data':{'record':{'record_id':'rec1'}}}])
+        self.assertEqual(ReviewService.read(s,'test','rec1')['record_id'],'rec1')
+        self.assertEqual(len(s.cards.client.calls),2)
+        self.assertEqual(s.cards.client.calls[1][1:],(None,0))
+        self.assertEqual(s.writes,[])
+    def test_persistent_expiry_stops_after_one_retry(self):
+        s=self.service([{'code':99991677},{'code':99991677}])
+        with self.assertRaisesRegex(PushError,'READ_FAILED_99991677'):ReviewService.read(s,'test','rec1')
+        self.assertEqual(len(s.cards.client.calls),2)
+    def test_permissions_and_transport_errors_are_not_retried(self):
+        s=self.service([{'code':99991672}])
+        with self.assertRaisesRegex(PushError,'READ_FAILED_99991672'):ReviewService.read(s,'test','rec1')
+        self.assertEqual(len(s.cards.client.calls),1)
+        s=self.service([TimeoutError()])
+        with self.assertRaises(TimeoutError):ReviewService.read(s,'test','rec1')
+        self.assertEqual(len(s.cards.client.calls),1)
+    def test_wrong_record_is_rejected(self):
+        s=self.service([{'code':0,'data':{'record':{'record_id':'recOther'}}}])
+        with self.assertRaisesRegex(PushError,'LINKED_RECORD_UNAVAILABLE'):ReviewService.read(s,'test','rec1')
+
 class GroupTests(unittest.TestCase):
     def setUp(self):
         self.lines=[dict(L,quantity=40),dict(L,quantity=60,poLineKey='102',identity=L['identity'].rsplit(':',1)[0]+':102')]

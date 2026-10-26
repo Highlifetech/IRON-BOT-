@@ -162,7 +162,18 @@ class ReviewService:
     def read(self, board, rid, variant=False):
         b, c = self.cards.boards[board], self.cfg(board)
         table = c['variants']['table'] if variant else b['table']
-        response = self.cards.client._get(f"/open-apis/bitable/v1/apps/{b['base']}/tables/{table}/records/{rid}")
+        path = f"/open-apis/bitable/v1/apps/{b['base']}/tables/{table}/records/{rid}"
+        response = self.cards.client._get(path)
+        # Only retry a read explicitly rejected for an expired access token.
+        # Do not replay writes, transport failures, or permission failures.
+        if response.get('code') == 99991677:
+            self.cards.client.token = None
+            self.cards.client.token_expires = 0
+            response = self.cards.client._get(path)
+        if response.get('code') != 0:
+            code = response.get('code')
+            safe_code = str(code) if isinstance(code, int) else 'UNKNOWN'
+            raise PushError('LINKED_RECORD_READ_FAILED_' + safe_code)
         if response.get('code') != 0 or response.get('data', {}).get('record', {}).get('record_id') != rid:
             raise PushError('LINKED_RECORD_UNAVAILABLE')
         return response['data']['record']
