@@ -91,6 +91,9 @@ if _MCP_URL and _MCP_TOKEN:
         return method in ("POST", "PUT", "PATCH") and (
             "/im/v1/messages" in p or "/im/v1/images" in p or "/im/v1/files" in p)
 
+    # Lark auth error codes meaning the access token is expired/invalid.
+    _USER_TOKEN_ERROR_CODES = {99991661, 99991663, 99991668, 99991677}
+
     def _proxy_call(method, path, params=None, body=None):
         p = path or ""
         if p.startswith("/open-apis/"):
@@ -111,6 +114,11 @@ if _MCP_URL and _MCP_TOKEN:
         # is the proxy itself rejecting us — treat as failure and fall back.
         if isinstance(data, dict) and "error" in data and "code" not in data:
             raise RuntimeError("proxy rejected: " + str(data.get("error")))
+        # The user's Lark login behind the proxy has expired or is invalid. Lark
+        # reports this inside a normal-looking reply, so raise here to make the
+        # caller fall back to the bot's own token instead of failing every call.
+        if isinstance(data, dict) and data.get("code") in _USER_TOKEN_ERROR_CODES:
+            raise RuntimeError(f"proxy user token rejected by Lark (code {data.get('code')})")
         return data
 
     def _get_as_user(path, params=None, **k):
