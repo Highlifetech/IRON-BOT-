@@ -75,30 +75,40 @@ class LarkClient:
             h["Content-Type"] = content_type
         return h
 
+    # Lark auth error codes meaning the tenant token is expired/invalid.
+    _TOKEN_ERROR_CODES = {99991661, 99991663, 99991668, 99991677}
+
+    def _send(self, make_request):
+        """Run a request; if Lark says the token expired, get a new one and retry once."""
+        for attempt in (1, 2):
+            resp = make_request()
+            try:
+                data = resp.json()
+            except ValueError:
+                data = None
+            if (attempt == 1 and isinstance(data, dict)
+                    and data.get("code") in self._TOKEN_ERROR_CODES):
+                logger.warning("Lark token rejected (code %s); refreshing and retrying once",
+                               data.get("code"))
+                self.token, self.token_expires = None, 0
+                continue
+            resp.raise_for_status()
+            return data if data is not None else resp.json()
+
     def _get(self, path, params=None, timeout=30):
-        resp = requests.get(f"{self.base_url}{path}", headers=self._headers(), params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._send(lambda: requests.get(f"{self.base_url}{path}", headers=self._headers(), params=params, timeout=timeout))
 
     def _post(self, path, body=None, params=None, timeout=30):
-        resp = requests.post(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._send(lambda: requests.post(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout))
 
     def _put(self, path, body=None, params=None, timeout=30):
-        resp = requests.put(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._send(lambda: requests.put(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout))
 
     def _patch(self, path, body=None, params=None, timeout=30):
-        resp = requests.patch(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._send(lambda: requests.patch(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout))
 
     def _delete(self, path, body=None, params=None, timeout=30):
-        resp = requests.delete(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        return self._send(lambda: requests.delete(f"{self.base_url}{path}", headers=self._headers(), json=body, params=params, timeout=timeout))
 
     def _paginate(self, path, params=None, items_key="items", data_key="data"):
         params = dict(params or {})
