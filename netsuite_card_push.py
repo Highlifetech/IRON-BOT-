@@ -205,6 +205,12 @@ class LarkCards:
         fields = {f['identity']: line['identity'], f['product']: line['product'],
                   f['description']: line['description'], f['quantity']: line['quantity'],
                   f['po_relation']: [master['record_id']], f['units']: line['units']}
+        # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
+        if f.get('po_link') and f['po_link'] != f['po_relation']:
+            fields[f['po_link']] = [master['record_id']]
+        # Starting values for discovered boards (e.g. Status = Pending Artwork).
+        for name, value in (b.get('initial_fields') or {}).items():
+            fields.setdefault(name, value)
         ship_to = validate_so_ship_to(line)
         if ship_to and ship_to['status']=='AVAILABLE':
             cfg = self.address_config.get(board)
@@ -354,6 +360,40 @@ def register(app):
             app.logger.error('NetSuite review extension disabled: invalid configuration')
             review=None
             cards.review_config={}
+
+    # Board discovery: any table in the catalog Base that carries the NetSuite
+    # sync fields becomes a board without editing OM_CARD_PUSH_BOARDS. Needs the
+    # review extension, because every board must also have review config.
+    registry = None
+    if review and os.environ.get('OM_CARD_DISCOVERY_ENABLED', 'true') == 'true' and not allow_short_key:
+        try:
+            from netsuite_board_discovery import BoardRegistry
+            if not isinstance(cards.address_config, dict): cards.address_config = {}
+            registry = BoardRegistry(cards.client, catalog, boards, cards.review_config, cards.address_config)
+            registry.start(interval=int(os.environ.get('OM_CARD_DISCOVERY_INTERVAL', '300')))
+        except Exception:
+            app.logger.error('NetSuite board discovery disabled: setup failed')
+            registry = None
+
+    @app.post('/integrations/netsuite/cards/boards')
+    def list_netsuite_card_boards():
+        # Signed like every other route: the board list is not public.
+        if request.content_length is None or request.content_length > 10000:
+            return jsonify(error='INVALID_REQUEST_SIZE'), 413
+        raw = request.get_data()
+        try:
+            authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
+            payload = json.loads(raw)
+            if payload.get('version') != 1 or payload.get('account') != os.environ.get('NETSUITE_ACCOUNT_ID'):
+                raise PushError('INVALID_ACCOUNT_OR_VERSION')
+        except (PushError, ValueError, TypeError, AttributeError):
+            return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
+        if registry:
+            rows = registry.listing()
+        else:
+            rows = sorted(({'key': k, 'label': b.get('label') or k, 'discovered': False}
+                           for k, b in boards.items() if k != 'test_po'), key=lambda r: r['label'].casefold())
+        return jsonify(boards=rows)
 
     @app.post('/integrations/netsuite/cards/status')
     def read_netsuite_card_status():
