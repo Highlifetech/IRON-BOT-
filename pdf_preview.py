@@ -236,3 +236,69 @@ def backfill(lark, user_get, bot_get, app_id, days=30, is_done=None, mark_done=N
             summary["per_chat"][name or cid] = n
     logger.info("PDF_BACKFILL done: %s", summary)
     return summary
+
+
+def _chat_history(user_get, chat_id, days):
+    import time as _t
+    start = str(int(_t.time()) - int(days) * 86400)
+    return _paginate_with(user_get, "/open-apis/im/v1/messages",
+                          {"container_id_type": "chat", "container_id": chat_id,
+                           "start_time": start, "page_size": 50})
+
+
+def preview_latest(lark, user_get, bot_get, chat_name, app_id, days=14):
+    """Test: preview the most recent PDF in the named chat (reply in the main chat)."""
+    chats = _paginate_with(bot_get, "/open-apis/im/v1/chats", {"page_size": 100})
+    chat = next((c for c in chats if c.get("name", "").lower() == chat_name.lower()
+                 or c.get("chat_id") == chat_name), None)
+    if not chat:
+        return {"error": f"Iron Bot is not in a chat named {chat_name!r}"}
+    latest = None
+    for m in _chat_history(user_get, chat["chat_id"], days):
+        if m.get("msg_type") != "file" or m.get("deleted") or (m.get("sender") or {}).get("id") == app_id:
+            continue
+        wm = {"message_type": "file", "message_id": m.get("message_id"), "chat_id": chat["chat_id"],
+              "content": (m.get("body") or {}).get("content", "")}
+        if is_pdf_message(wm) and (latest is None or int(m.get("create_time", 0)) > int(latest[0].get("create_time", 0))):
+            latest = (m, wm)
+    if not latest:
+        return {"error": f"no PDF in {chat.get('name')} in the last {days} days"}
+    name = json.loads(latest[1]["content"]).get("file_name")
+    ok = handle_pdf_message(lark, latest[1], in_thread=False)
+    return {"chat": chat.get("name"), "file": name, "posted": ok}
+
+
+def cleanup_cards(user_get, bot_get, bot_delete, app_id, days=30, dry_run=False):
+    """Recall Iron Bot's old big PDF preview cards (the ones with the 📄 filename header)."""
+    out = {"chats": 0, "found": 0, "deleted": 0, "failed": 0, "per_chat": {}}
+    for c in _paginate_with(bot_get, "/open-apis/im/v1/chats", {"page_size": 100}):
+        out["chats"] += 1
+        try:
+            msgs = _chat_history(user_get, c.get("chat_id"), days)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("PDF_CLEANUP history failed %s: %s", c.get("name"), str(e)[:150])
+            continue
+        n = 0
+        for m in msgs:
+            if (m.get("msg_type") != "interactive" or m.get("deleted")
+                    or (m.get("sender") or {}).get("id") != app_id):
+                continue
+            raw = (m.get("body") or {}).get("content", "")
+            if "📄" not in raw and "\\ud83d\\udcc4" not in raw.lower():
+                continue
+            out["found"] += 1
+            n += 1
+            if dry_run:
+                continue
+            try:
+                d = bot_delete(f"/open-apis/im/v1/messages/{m['message_id']}")
+                if isinstance(d, dict) and d.get("code", 0) != 0:
+                    raise Exception(f"{d.get('code')} {d.get('msg')}")
+                out["deleted"] += 1
+            except Exception as e:  # noqa: BLE001
+                out["failed"] += 1
+                logger.warning("PDF_CLEANUP recall failed %s: %s", m.get("message_id"), str(e)[:150])
+        if n:
+            out["per_chat"][c.get("name") or c.get("chat_id")] = n
+    logger.info("PDF_CLEANUP done: %s", out)
+    return out

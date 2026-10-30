@@ -2731,6 +2731,14 @@ def pdf_preview_admin():
         return jsonify({"results": pdf_preview.join_all(_user_post, rows, LARK_APP_ID)})
     if action == "status":
         return jsonify(_pdf_backfill_state)
+    if action == "test":
+        return jsonify(pdf_preview.preview_latest(
+            lark, lark._get, _BOT_GET, request.args.get("chat", "Purchase Orders (Workshop)"), LARK_APP_ID))
+    if action == "cleanup":
+        return jsonify(pdf_preview.cleanup_cards(
+            lark._get, _BOT_GET, _BOT_DELETE, LARK_APP_ID,
+            days=int(request.args.get("days", "30") or "30"),
+            dry_run=request.args.get("dry", "") in ("1", "true")))
     if action == "backfill":
         if _pdf_backfill_state["running"]:
             return jsonify({"error": "already running"}), 409
