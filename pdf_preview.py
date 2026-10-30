@@ -278,11 +278,22 @@ def cleanup_cards(user_get, bot_get, bot_delete, app_id, days=30, dry_run=False)
         except Exception as e:  # noqa: BLE001
             logger.warning("PDF_CLEANUP history failed %s: %s", c.get("name"), str(e)[:150])
             continue
+        # Thread replies aren't in the chat's main history -- pull each thread.
+        threads = {m.get("thread_id") for m in msgs if m.get("thread_id")}
+        for tid in threads:
+            try:
+                msgs = msgs + _paginate_with(user_get, "/open-apis/im/v1/messages",
+                                             {"container_id_type": "thread", "container_id": tid,
+                                              "page_size": 50})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("PDF_CLEANUP thread %s failed: %s", tid, str(e)[:150])
+        seen_ids = set()
         n = 0
         for m in msgs:
             if (m.get("msg_type") != "interactive" or m.get("deleted")
-                    or (m.get("sender") or {}).get("id") != app_id):
+                    or (m.get("sender") or {}).get("id") != app_id or m.get("message_id") in seen_ids):
                 continue
+            seen_ids.add(m.get("message_id"))
             raw = (m.get("body") or {}).get("content", "")
             if "📄" not in raw and "\\ud83d\\udcc4" not in raw.lower():
                 continue

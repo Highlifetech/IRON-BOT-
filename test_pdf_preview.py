@@ -123,3 +123,16 @@ def test_preview_latest_picks_newest_pdf():
                                      "Purchase Orders (Workshop)", "cli_x")
     assert out == {"chat": "Purchase Orders (Workshop)", "file": "new.pdf", "posted": True}
     assert lark.posts[0][0] == "/open-apis/im/v1/messages/m2/reply"
+
+
+def test_cleanup_reads_threads():
+    main = [{"message_id": "f", "msg_type": "file", "thread_id": "omt_1", "sender": {"id": "ou_h"},
+             "body": {"content": "{}"}}]
+    thread = [{"message_id": "a", "msg_type": "interactive", "sender": {"id": "cli_x"},
+               "body": {"content": json.dumps({"title": "📄 SO1.pdf"}, ensure_ascii=False)}}]
+    def user_get(p, q):
+        return {"code": 0, "data": {"items": thread if q.get("container_id_type") == "thread" else main}}
+    deleted = []
+    out = pdf_preview.cleanup_cards(user_get, lambda p, q: {"code": 0, "data": {"items": [{"chat_id": "c"}]}},
+                                    lambda p: deleted.append(p) or {"code": 0}, "cli_x")
+    assert deleted == ["/open-apis/im/v1/messages/a"] and out["found"] == 1
