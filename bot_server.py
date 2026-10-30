@@ -3356,5 +3356,11 @@ register_netsuite_card_push(app)
 
 if __name__ == "__main__":
     _start_background_tasks()
+    # NetSuite → Lark PO billing status sync (Master PO List). Disable with OM_BILLING_SYNC_ENABLED=false.
+    try:
+        from netsuite_billing_sync import register as register_billing_sync
+        register_billing_sync(app)
+    except Exception as e:
+        logger.error(f"Billing sync not started: {e}")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
