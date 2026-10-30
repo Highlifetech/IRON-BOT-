@@ -17,8 +17,8 @@ import os
 logger = logging.getLogger(__name__)
 
 ENABLED = os.environ.get("PDF_PREVIEW", "1").strip().lower() not in ("0", "false", "no", "")
-MAX_PAGES = max(1, int(os.environ.get("PDF_PREVIEW_MAX_PAGES", "3") or "3"))
-DPI = max(50, int(os.environ.get("PDF_PREVIEW_DPI", "110") or "110"))
+MAX_PAGES = max(1, int(os.environ.get("PDF_PREVIEW_MAX_PAGES", "1") or "1"))
+DPI = max(50, int(os.environ.get("PDF_PREVIEW_DPI", "130") or "130"))
 ONLY_CHATS = {c.strip() for c in os.environ.get("PDF_PREVIEW_CHATS", "").split(",") if c.strip()}
 IN_THREAD = os.environ.get("PDF_PREVIEW_IN_THREAD", "0").strip().lower() in ("1", "true", "yes")
 
@@ -92,7 +92,8 @@ def build_card(file_name, image_keys, total_pages):
 
 
 def handle_pdf_message(lark, msg, in_thread=None):
-    """Download the PDF from the message, render it, and reply with a preview card.
+    """Download the PDF, render page 1, and reply with it as a plain image.
+    Lark shows images as a compact thumbnail that opens full-size on click.
     Returns True when a preview was posted."""
     message_id = msg.get("message_id", "")
     in_thread = IN_THREAD if in_thread is None else in_thread
@@ -104,14 +105,13 @@ def handle_pdf_message(lark, msg, in_thread=None):
         pngs, total = render_pages(pdf_bytes)
         if not pngs:
             return False
-        image_keys = [lark.upload_image(p) for p in pngs]
-        card = build_card(file_name, image_keys, total)
-        body = {"msg_type": "interactive", "content": json.dumps(card)}
-        if in_thread:
-            body["reply_in_thread"] = True
-        data = lark._post(f"/open-apis/im/v1/messages/{message_id}/reply", body=body)
-        if data.get("code") != 0:
-            raise Exception(f"reply failed: {data}")
+        for png in pngs:
+            body = {"msg_type": "image", "content": json.dumps({"image_key": lark.upload_image(png)})}
+            if in_thread:
+                body["reply_in_thread"] = True
+            data = lark._post(f"/open-apis/im/v1/messages/{message_id}/reply", body=body)
+            if data.get("code") != 0:
+                raise Exception(f"reply failed: {data}")
         logger.info("PDF_PREVIEW: %s (%d/%d pages) msg=%s", file_name, len(pngs), total, message_id)
         return True
     except Exception as e:  # noqa: BLE001 - never let a preview failure break the webhook
@@ -171,7 +171,8 @@ def join_all(user_post, rows, app_id):
     return out
 
 
-def backfill(lark, user_get, bot_get, app_id, days=30, is_done=None, mark_done=None, dry_run=False):
+def backfill(lark, user_get, bot_get, app_id, days=30, is_done=None, mark_done=None, dry_run=False,
+             bot_delete=None, replace_old=False):
     """Preview every PDF posted in Iron Bot's chats in the last `days` days that
     doesn't already have one. Old PDFs get the preview in a thread under the file,
     so the main chats aren't flooded."""
@@ -188,9 +189,16 @@ def backfill(lark, user_get, bot_get, app_id, days=30, is_done=None, mark_done=N
         except Exception as e:  # noqa: BLE001
             logger.warning("PDF_BACKFILL history failed chat=%s: %s", name, str(e)[:200])
             continue
-        # PDFs that already have a reply from Iron Bot
-        replied = {m.get("parent_id") for m in msgs
-                   if m.get("parent_id") and (m.get("sender") or {}).get("id") == app_id}
+        # Iron Bot's replies to PDFs: image = current style, interactive = old big card
+        bot_replies = [m for m in msgs if m.get("parent_id") and (m.get("sender") or {}).get("id") == app_id
+                       and not m.get("deleted")]
+        replied = {m["parent_id"] for m in bot_replies if m.get("msg_type") == "image"}
+        old_cards = {}
+        for m in bot_replies:
+            if m.get("msg_type") == "interactive":
+                old_cards.setdefault(m["parent_id"], []).append(m["message_id"])
+        if not replace_old:
+            replied |= set(old_cards)
         n = 0
         for m in msgs:
             if m.get("msg_type") != "file" or m.get("deleted"):
@@ -201,12 +209,21 @@ def backfill(lark, user_get, bot_get, app_id, days=30, is_done=None, mark_done=N
                 continue
             summary["pdfs"] += 1
             mid = m.get("message_id")
-            if mid in replied or (is_done and is_done(mid)):
+            if mid in replied or (not replace_old and is_done and is_done(mid)):
                 summary["already"] += 1
                 continue
             if dry_run:
                 n += 1
                 continue
+            if replace_old and bot_delete:
+                for old_id in old_cards.get(mid, []):
+                    try:
+                        d = bot_delete(f"/open-apis/im/v1/messages/{old_id}")
+                        if isinstance(d, dict) and d.get("code", 0) != 0:
+                            raise Exception(f"{d.get('code')} {d.get('msg')}")
+                        summary["replaced"] = summary.get("replaced", 0) + 1
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("PDF_BACKFILL recall failed %s: %s", old_id, str(e)[:120])
             if handle_pdf_message(lark, wm, in_thread=True):
                 summary["posted"] += 1
                 n += 1
