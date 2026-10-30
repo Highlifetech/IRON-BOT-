@@ -96,3 +96,30 @@ def test_backfill_replaces_old_cards():
                              replace_old=True)
     assert deleted == ["/open-apis/im/v1/messages/c1"]
     assert (s["posted"], s["already"], s["replaced"]) == (1, 1, 1)
+
+
+def test_cleanup_only_deletes_bot_pdf_cards():
+    hist = [{"message_id": "a", "msg_type": "interactive", "sender": {"id": "cli_x"},
+             "body": {"content": json.dumps({"title": "📄 SO1.pdf"})}},
+            {"message_id": "b", "msg_type": "interactive", "sender": {"id": "cli_x"},
+             "body": {"content": json.dumps({"title": "Morning digest"})}},
+            {"message_id": "c", "msg_type": "interactive", "sender": {"id": "ou_h"},
+             "body": {"content": "📄"}}]
+    deleted = []
+    out = pdf_preview.cleanup_cards(lambda p, q: {"code": 0, "data": {"items": hist}},
+                                    lambda p, q: {"code": 0, "data": {"items": [{"chat_id": "c1", "name": "PO"}]}},
+                                    lambda p: deleted.append(p) or {"code": 0}, "cli_x")
+    assert deleted == ["/open-apis/im/v1/messages/a"] and out["deleted"] == 1
+
+
+def test_preview_latest_picks_newest_pdf():
+    def f(mid, name, t):
+        return {"message_id": mid, "msg_type": "file", "create_time": t, "sender": {"id": "ou_h"},
+                "body": {"content": json.dumps({"file_key": "k", "file_name": name})}}
+    hist = [f("m1", "old.pdf", "100"), f("m2", "new.pdf", "200"), f("m3", "x.ai", "300")]
+    lark = FakeLark(_pdf(1))
+    out = pdf_preview.preview_latest(lark, lambda p, q: {"code": 0, "data": {"items": hist}},
+                                     lambda p, q: {"code": 0, "data": {"items": [{"chat_id": "c", "name": "Purchase Orders (Workshop)"}]}},
+                                     "Purchase Orders (Workshop)", "cli_x")
+    assert out == {"chat": "Purchase Orders (Workshop)", "file": "new.pdf", "posted": True}
+    assert lark.posts[0][0] == "/open-apis/im/v1/messages/m2/reply"
