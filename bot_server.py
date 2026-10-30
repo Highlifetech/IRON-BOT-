@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 import anthropic
 import iron_tools
+import pdf_preview
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
@@ -2658,6 +2659,11 @@ def webhook():
         logger.info(f"WEBHOOK: Interactive card from sender_type={sender_type} sender_id={sender_id_val} (our bot={BOT_OPEN_ID})")
         if sender_id_val != BOT_OPEN_ID:
             threading.Thread(target=_handle_incoming_card, args=(msg, sender,), daemon=True).start()
+        return jsonify({"code": 0})
+    # PDF posted in any chat Iron Bot is in -> reply with an image preview of it.
+    if msg_type == "file":
+        if pdf_preview.should_preview(msg, sender_id_val, BOT_OPEN_ID):
+            threading.Thread(target=pdf_preview.handle_pdf_message, args=(lark, msg), daemon=True).start()
         return jsonify({"code": 0})
     image_b64 = image_media_type = None
     if msg_type == "image":
