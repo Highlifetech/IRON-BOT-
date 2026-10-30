@@ -42,9 +42,9 @@ def test_reply_is_one_plain_image():
     assert pdf_preview.handle_pdf_message(lark, _msg())
     assert len(lark.uploads) == pdf_preview.MAX_PAGES == 1
     path, body = lark.posts[0]
-    assert path == "/open-apis/im/v1/messages/om_1/reply"
+    assert path == "/open-apis/im/v1/messages?receive_id_type=chat_id"
+    assert body["receive_id"] == "oc_po"
     assert body["msg_type"] == "image" and json.loads(body["content"]) == {"image_key": "img_1"}
-    assert "reply_in_thread" not in body
 
 
 def test_bad_pdf_does_not_raise():
@@ -122,7 +122,7 @@ def test_preview_latest_picks_newest_pdf():
                                      lambda p, q: {"code": 0, "data": {"items": [{"chat_id": "c", "name": "Purchase Orders (Workshop)"}]}},
                                      "Purchase Orders (Workshop)", "cli_x")
     assert out == {"chat": "Purchase Orders (Workshop)", "file": "new.pdf", "posted": True}
-    assert lark.posts[0][0] == "/open-apis/im/v1/messages/m2/reply"
+    assert lark.posts[0][1]["receive_id"] == "c"
 
 
 def test_cleanup_reads_threads():
