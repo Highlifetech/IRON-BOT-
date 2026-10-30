@@ -21,6 +21,9 @@ MAX_PAGES = max(1, int(os.environ.get("PDF_PREVIEW_MAX_PAGES", "1") or "1"))
 DPI = max(50, int(os.environ.get("PDF_PREVIEW_DPI", "130") or "130"))
 ONLY_CHATS = {c.strip() for c in os.environ.get("PDF_PREVIEW_CHATS", "").split(",") if c.strip()}
 IN_THREAD = os.environ.get("PDF_PREVIEW_IN_THREAD", "0").strip().lower() in ("1", "true", "yes")
+# Default: post the image as a normal chat message right under the PDF (not a reply,
+# which Lark folds into a side thread). PDF_PREVIEW_AS_REPLY=1 restores reply mode.
+AS_REPLY = os.environ.get("PDF_PREVIEW_AS_REPLY", "0").strip().lower() in ("1", "true", "yes")
 
 # Lark rejects message images over 10 MB; stay well under it.
 _MAX_IMAGE_BYTES = 9 * 1024 * 1024
@@ -107,9 +110,13 @@ def handle_pdf_message(lark, msg, in_thread=None):
             return False
         for png in pngs:
             body = {"msg_type": "image", "content": json.dumps({"image_key": lark.upload_image(png)})}
-            if in_thread:
-                body["reply_in_thread"] = True
-            data = lark._post(f"/open-apis/im/v1/messages/{message_id}/reply", body=body)
+            if in_thread or AS_REPLY or not msg.get("chat_id"):
+                if in_thread:
+                    body["reply_in_thread"] = True
+                data = lark._post(f"/open-apis/im/v1/messages/{message_id}/reply", body=body)
+            else:
+                body["receive_id"] = msg["chat_id"]
+                data = lark._post("/open-apis/im/v1/messages?receive_id_type=chat_id", body=body)
             if data.get("code") != 0:
                 raise Exception(f"reply failed: {data}")
         logger.info("PDF_PREVIEW: %s (%d/%d pages) msg=%s", file_name, len(pngs), total, message_id)
@@ -278,11 +285,22 @@ def cleanup_cards(user_get, bot_get, bot_delete, app_id, days=30, dry_run=False)
         except Exception as e:  # noqa: BLE001
             logger.warning("PDF_CLEANUP history failed %s: %s", c.get("name"), str(e)[:150])
             continue
+        # Thread replies aren't in the chat's main history -- pull each thread.
+        threads = {m.get("thread_id") for m in msgs if m.get("thread_id")}
+        for tid in threads:
+            try:
+                msgs = msgs + _paginate_with(user_get, "/open-apis/im/v1/messages",
+                                             {"container_id_type": "thread", "container_id": tid,
+                                              "page_size": 50})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("PDF_CLEANUP thread %s failed: %s", tid, str(e)[:150])
+        seen_ids = set()
         n = 0
         for m in msgs:
             if (m.get("msg_type") != "interactive" or m.get("deleted")
-                    or (m.get("sender") or {}).get("id") != app_id):
+                    or (m.get("sender") or {}).get("id") != app_id or m.get("message_id") in seen_ids):
                 continue
+            seen_ids.add(m.get("message_id"))
             raw = (m.get("body") or {}).get("content", "")
             if "📄" not in raw and "\\ud83d\\udcc4" not in raw.lower():
                 continue
