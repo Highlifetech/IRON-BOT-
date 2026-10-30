@@ -68,7 +68,7 @@ LARK_CHAT_ID_BRIEANNE = os.environ.get("LARK_CHAT_ID_BRIEANNE", "")
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 lark = LarkClient()
 # Bot-identity readers, captured before act-as-user mode wraps them.
-_BOT_GET, _BOT_POST = lark._get, lark._post
+_BOT_GET, _BOT_POST, _BOT_DELETE = lark._get, lark._post, lark._delete
 
 # ---------------------------------------------------------------------------
 # Act-as-user mode: route Iron Bot's READS and content EDITS through the
@@ -2736,12 +2736,14 @@ def pdf_preview_admin():
             return jsonify({"error": "already running"}), 409
         days = int(request.args.get("days", "30") or "30")
         dry = request.args.get("dry", "") in ("1", "true")
+        replace_old = request.args.get("replace", "") in ("1", "true")
 
         def _run():
             _pdf_backfill_state["running"] = True
             try:
                 _pdf_backfill_state["last"] = pdf_preview.backfill(
                     lark, lark._get, _BOT_GET, LARK_APP_ID, days=days, dry_run=dry,
+                    bot_delete=_BOT_DELETE, replace_old=replace_old,
                     is_done=lambda mid: _is_action_clicked(f"pdf_preview_{mid}"),
                     mark_done=lambda mid: _mark_action_clicked(f"pdf_preview_{mid}", "iron_bot"))
             except Exception as e:  # noqa: BLE001

@@ -37,22 +37,14 @@ def test_filters():
     assert not pdf_preview.should_preview(_msg(mtype="text"), "ou_hannah", "ou_bot")
 
 
-def test_reply_card_caps_pages():
+def test_reply_is_one_plain_image():
     lark = FakeLark(_pdf(5))
-    pdf_preview.handle_pdf_message(lark, _msg())
-    assert len(lark.uploads) == pdf_preview.MAX_PAGES == 3
+    assert pdf_preview.handle_pdf_message(lark, _msg())
+    assert len(lark.uploads) == pdf_preview.MAX_PAGES == 1
     path, body = lark.posts[0]
     assert path == "/open-apis/im/v1/messages/om_1/reply"
-    card = json.loads(body["content"])
-    assert [e["img_key"] for e in card["elements"] if e["tag"] == "img"] == ["img_1", "img_2", "img_3"]
-    assert "of 5" in card["elements"][-1]["elements"][0]["content"]
-
-
-def test_single_page():
-    lark = FakeLark(_pdf(1))
-    pdf_preview.handle_pdf_message(lark, _msg())
-    card = json.loads(lark.posts[0][1]["content"])
-    assert card["elements"][-1]["elements"][0]["content"] == "Page 1 of 1"
+    assert body["msg_type"] == "image" and json.loads(body["content"]) == {"image_key": "img_1"}
+    assert "reply_in_thread" not in body
 
 
 def test_bad_pdf_does_not_raise():
@@ -88,3 +80,19 @@ def test_backfill_skips_done_and_bot_files():
     s = pdf_preview.backfill(lark, user_get, bot_get, "cli_x", is_done=lambda m: False, mark_done=done.append)
     assert (s["pdfs"], s["already"], s["posted"]) == (2, 1, 1)
     assert done == ["m1"] and lark.posts[0][1]["reply_in_thread"] is True
+
+
+def test_backfill_replaces_old_cards():
+    def msg(mid, name, sender="ou_h", parent=None, t="file"):
+        return {"message_id": mid, "msg_type": t, "parent_id": parent, "sender": {"id": sender},
+                "body": {"content": json.dumps({"file_key": "k", "file_name": name})}}
+    hist = [msg("m1", "SO1.pdf"), msg("c1", "", "cli_x", "m1", "interactive"),
+            msg("m2", "SO2.pdf"), msg("i2", "", "cli_x", "m2", "image")]
+    lark = FakeLark(_pdf(1))
+    deleted = []
+    s = pdf_preview.backfill(lark, lambda p, q: {"code": 0, "data": {"items": hist}},
+                             lambda p, q: {"code": 0, "data": {"items": [{"chat_id": "c"}]}}, "cli_x",
+                             is_done=lambda m: True, bot_delete=lambda p: deleted.append(p) or {"code": 0},
+                             replace_old=True)
+    assert deleted == ["/open-apis/im/v1/messages/c1"]
+    assert (s["posted"], s["already"], s["replaced"]) == (1, 1, 1)
