@@ -67,6 +67,8 @@ LARK_CHAT_ID_BRIEANNE = os.environ.get("LARK_CHAT_ID_BRIEANNE", "")
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 lark = LarkClient()
+# Bot-identity readers, captured before act-as-user mode wraps them.
+_BOT_GET, _BOT_POST = lark._get, lark._post
 
 # ---------------------------------------------------------------------------
 # Act-as-user mode: route Iron Bot's READS and content EDITS through the
@@ -2663,7 +2665,7 @@ def webhook():
     # PDF posted in any chat Iron Bot is in -> reply with an image preview of it.
     if msg_type == "file":
         if pdf_preview.should_preview(msg, sender_id_val, BOT_OPEN_ID):
-            threading.Thread(target=pdf_preview.handle_pdf_message, args=(lark, msg), daemon=True).start()
+            threading.Thread(target=_preview_and_mark, args=(msg,), daemon=True).start()
         return jsonify({"code": 0})
     image_b64 = image_media_type = None
     if msg_type == "image":
@@ -2699,6 +2701,57 @@ def webhook():
         kwargs={"image_b64": image_b64, "image_media_type": image_media_type},
         daemon=True).start()
     return jsonify({"code": 0})
+
+def _preview_and_mark(msg):
+    if pdf_preview.handle_pdf_message(lark, msg):
+        _mark_action_clicked(f"pdf_preview_{msg.get('message_id', '')}", "iron_bot")
+
+
+_PDF_ADMIN_SECRET = os.environ.get("PDF_ADMIN_SECRET", "").strip()
+_pdf_backfill_state = {"running": False, "last": None}
+
+
+@app.route("/pdf-preview/admin", methods=["GET", "POST"])
+def pdf_preview_admin():
+    """?key=PDF_ADMIN_SECRET&action=chats|join|backfill|status[&days=30][&dry=1]"""
+    if not _PDF_ADMIN_SECRET or request.args.get("key", "") != _PDF_ADMIN_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    from config import LARK_APP_ID
+    action = request.args.get("action", "chats")
+    if action == "chats":
+        return jsonify({"chats": pdf_preview.chat_report(lark._get, _BOT_GET)})
+    if action == "join":
+        rows = pdf_preview.chat_report(lark._get, _BOT_GET)
+
+        def _user_post(path, body, params):
+            # Adding the bot needs a chat member's identity (you), via the connector.
+            if "_proxy_call" in globals():
+                return _proxy_call("POST", path, params=params, body=body)
+            return _BOT_POST(path, body=body, params=params)
+        return jsonify({"results": pdf_preview.join_all(_user_post, rows, LARK_APP_ID)})
+    if action == "status":
+        return jsonify(_pdf_backfill_state)
+    if action == "backfill":
+        if _pdf_backfill_state["running"]:
+            return jsonify({"error": "already running"}), 409
+        days = int(request.args.get("days", "30") or "30")
+        dry = request.args.get("dry", "") in ("1", "true")
+
+        def _run():
+            _pdf_backfill_state["running"] = True
+            try:
+                _pdf_backfill_state["last"] = pdf_preview.backfill(
+                    lark, lark._get, _BOT_GET, LARK_APP_ID, days=days, dry_run=dry,
+                    is_done=lambda mid: _is_action_clicked(f"pdf_preview_{mid}"),
+                    mark_done=lambda mid: _mark_action_clicked(f"pdf_preview_{mid}", "iron_bot"))
+            except Exception as e:  # noqa: BLE001
+                _pdf_backfill_state["last"] = {"error": str(e)[:300]}
+            finally:
+                _pdf_backfill_state["running"] = False
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"started": True, "days": days, "dry_run": dry})
+    return jsonify({"error": "unknown action"}), 400
+
 
 @app.route("/card-callback", methods=["POST"])
 def card_callback():

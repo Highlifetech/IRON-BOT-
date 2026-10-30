@@ -59,3 +59,32 @@ def test_bad_pdf_does_not_raise():
     lark = FakeLark(b"not a pdf")
     pdf_preview.handle_pdf_message(lark, _msg())
     assert lark.posts == []
+
+
+def test_chat_report_and_join():
+    def user_get(path, params):
+        return {"code": 0, "data": {"items": [{"chat_id": "a", "name": "PO"}, {"chat_id": "b", "name": "Quotes"}]}}
+    def bot_get(path, params):
+        return {"code": 0, "data": {"items": [{"chat_id": "a", "name": "PO"}]}}
+    rows = pdf_preview.chat_report(user_get, bot_get)
+    assert [(r["name"], r["iron_bot_in"]) for r in rows] == [("Quotes", False), ("PO", True)]
+    calls = []
+    res = pdf_preview.join_all(lambda p, b, q: calls.append((p, b, q)) or {"code": 0}, rows, "cli_x")
+    assert calls == [("/open-apis/im/v1/chats/b/members", {"id_list": ["cli_x"]}, {"member_id_type": "app_id"})]
+    assert res[0]["added"]
+
+
+def test_backfill_skips_done_and_bot_files():
+    pdf = _pdf(1)
+    def msg(mid, name, sender="ou_h", parent=None, t="file"):
+        return {"message_id": mid, "msg_type": t, "parent_id": parent, "sender": {"id": sender},
+                "body": {"content": json.dumps({"file_key": "k", "file_name": name})}}
+    hist = [msg("m1", "SO1.pdf"), msg("m2", "PO2.pdf"), msg("m3", "x.ai"),
+            msg("m4", "bot.pdf", sender="cli_x"), msg("r", "", sender="cli_x", parent="m2", t="interactive")]
+    lark = FakeLark(pdf)
+    user_get = lambda p, q: {"code": 0, "data": {"items": hist}}
+    bot_get = lambda p, q: {"code": 0, "data": {"items": [{"chat_id": "c", "name": "PO"}]}}
+    done = []
+    s = pdf_preview.backfill(lark, user_get, bot_get, "cli_x", is_done=lambda m: False, mark_done=done.append)
+    assert (s["pdfs"], s["already"], s["posted"]) == (2, 1, 1)
+    assert done == ["m1"] and lark.posts[0][1]["reply_in_thread"] is True
