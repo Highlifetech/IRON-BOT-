@@ -13,7 +13,10 @@ from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager, closing
 from netsuite_card_push import PushError, validate_payload
 
-SOURCE_KEYS = ('itemId', 'itemName', 'product', 'description', 'quantity', 'units', 'closed', 'orderStatus')
+# Product name and description are seeded from NetSuite when a card is created,
+# then owned by the team in Lark: never compared, flagged or overwritten.
+TEAM_OWNED = ('product', 'description')
+SOURCE_KEYS = ('itemId', 'itemName', 'quantity', 'units', 'closed', 'orderStatus')
 META_KEYS = ('po_url', 'synced', 'issue', 'source_status')
 
 def digest(value):
@@ -213,7 +216,7 @@ class ReviewService:
 
     def managed(self, board, record, variant=False):
         f = self.cards.boards[board]['fields'] if not variant else self.cfg(board)['variants']
-        keys = ('identity', 'product', 'description', 'quantity', 'units', 'po_relation') if not variant else ('identity', 'size', 'quantity', 'parent')
+        keys = ('identity', 'quantity', 'units', 'po_relation') if not variant else ('identity', 'size', 'quantity', 'parent')
         # Include relationship/identity and all source-owned values to catch concurrent edits.
         result={f[k]: record.get('fields', {}).get(f[k]) for k in keys}
         if not variant and self.cfg(board).get('variants_relation'):
@@ -235,7 +238,9 @@ class ReviewService:
         cur.execute('SELECT baseline,observed FROM om_ns_card_sources WHERE board=%s AND record_id=%s', (prior['board'],prior['record_id']))
         states=cur.fetchall()
         if any(b is None for b,o in states): return 'Initial source comparison needs review'
-        if any(b != o for b,o in states): return 'NetSuite changes need review'
+        # Older snapshots also stored product/description; compare only NetSuite-owned keys.
+        def owned(s): return {k: (s or {}).get(k) for k in SOURCE_KEYS}
+        if any(owned(b) != owned(o) for b,o in states): return 'NetSuite changes need review'
         return ''
 
     def verify_target(self,prior,line,card,variant):
@@ -272,7 +277,7 @@ class ReviewService:
                 proposed = {vcfg['quantity']: line['quantity']}
                 # Preserve manually chosen Size and grouped product name.
             else:
-                proposed = {fields[k]: line[k] for k in ('product', 'description', 'quantity', 'units')}
+                proposed = {fields[k]: line[k] for k in ('quantity', 'units')}
             token = secrets.token_urlsafe(32)
             proposal = {'board': board, 'record_id': rid, 'variant_id': prior['variant_id'], 'fields': proposed,
                         'source': current, 'metadata': self.metadata(board, line, True), 'line': line}

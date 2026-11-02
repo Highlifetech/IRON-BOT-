@@ -39,7 +39,7 @@ class Service(ReviewService):
     def issue(self,*args):return ''
     def token(self,line=L,variant=False):
         before={'card':self.managed('test',self.card),'variant':self.managed('test',self.variant,True) if variant else None}
-        fields={'Quantity':line['quantity']} if variant else {FIELDS[k]:line[k] for k in ('product','description','quantity','units')}
+        fields={'Quantity':line['quantity']} if variant else {FIELDS[k]:line[k] for k in ('quantity','units')}
         p={'board':'test','record_id':'rec1','variant_id':'recV' if variant else None,'fields':fields,'metadata':self.metadata('test',line,True)}
         self.store.tokens['TOKEN']=['actor',line['identity'],digest(snapshot(line)),before,p,int(time.time())+600,'prepared']
 
@@ -93,10 +93,21 @@ class ReviewTests(unittest.TestCase):
                 with self.assertRaisesRegex(PushError,'UPDATE_UNCONFIRMED'):service.apply(L,'actor','TOKEN')
                 self.assertEqual(service.store.saved,[])
                 self.assertEqual(service.store.tokens['TOKEN'][6],'applying')
-    def test_changed_lark_value_requires_new_review(self):
-        self.s.card['fields']['Description']='Team edited this'
+    def test_changed_lark_quantity_requires_new_review(self):
+        self.s.card['fields']['Ordered']=999
         with self.assertRaisesRegex(PushError,'LARK_CHANGED'):self.s.apply(L,'actor','TOKEN')
         self.assertEqual(self.s.writes,[])
+    def test_team_edited_name_and_description_are_kept(self):
+        self.s.card['fields']['Product']='Team name';self.s.card['fields']['Description']='Team specs'
+        self.assertEqual(self.s.apply(L,'actor','TOKEN')['status'],'Updated from NetSuite')
+        self.assertEqual((self.s.card['fields']['Product'],self.s.card['fields']['Description']),('Team name','Team specs'))
+        self.assertEqual(self.s.card['fields']['Ordered'],100)
+        for _,fields in self.s.writes:
+            self.assertNotIn('Product',fields);self.assertNotIn('Description',fields)
+    def test_netsuite_name_change_is_not_a_source_change(self):
+        from netsuite_card_review import SOURCE_KEYS
+        self.assertNotIn('product',SOURCE_KEYS);self.assertNotIn('description',SOURCE_KEYS)
+        self.assertEqual(snapshot(L),snapshot(dict(L,product='Renamed in NetSuite',description='New text')))
     def test_changed_link_requires_new_review(self):
         self.s.card['fields']['PO']=['recOTHER']
         with self.assertRaisesRegex(PushError,'CARD_PO_RELATION_CHANGED'):self.s.apply(L,'actor','TOKEN')
