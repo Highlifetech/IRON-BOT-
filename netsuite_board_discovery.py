@@ -30,7 +30,7 @@ def _named(base):
 
 BOARD_FIELDS = {
     'identity': (('NetSuite product line ID',), (TEXT,)),
-    'product': (('Products',), (TEXT,)),
+    'product': (('Product Name', 'Products'), (TEXT,)),
     'description': (('Product Description',), (TEXT,)),
     'quantity': (('Ordered Quantity (NetSuite)', 'Ordered Quantity', 'Ordered Quantity — New'), (TEXT, NUMBER)),
     'units': (('Unit',), (TEXT,)),

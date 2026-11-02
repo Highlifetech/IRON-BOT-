@@ -206,6 +206,9 @@ def friendly_reason(error):
     return 'Needs review — send unconfirmed' + (f' ({code})' if code else '')
 
 
+PRODUCT_FIELD_NAMES = ('Product Name', 'Products')
+
+
 class LarkCards:
     def __init__(self, client, boards, catalog):
         self.client, self.boards, self.catalog = client, boards, catalog
@@ -213,6 +216,27 @@ class LarkCards:
         self.address_config = {}
         self._catalog_lock = threading.Lock()
         self._catalog_added = {}
+        self._product_field = {}
+
+    def product_field(self, board):
+        """Card title column. Renamed in Lark from "Products" to "Product Name";
+        accept either so the rename can happen board by board without downtime."""
+        b = self.boards[board]
+        configured = b['fields']['product']
+        cached = self._product_field.get(board)
+        if cached and time.time() - cached[0] < 300:
+            return cached[1]
+        name = configured
+        try:
+            names = {f.get('field_name') for f in (self.client.list_fields(b['table'], app_token=b['base']) or [])}
+            for candidate in PRODUCT_FIELD_NAMES:
+                if candidate in names:
+                    name = candidate
+                    break
+        except Exception:
+            pass
+        self._product_field[board] = (time.time(), name)
+        return name
 
     def add_master(self, line):
         """Add a header row for a PO the catalog sync has not written yet.
@@ -315,7 +339,7 @@ class LarkCards:
         master = self.master(board, line, allow_add=True)
         f = b['fields']
         name, description = starting_name_and_description(line)
-        fields = {f['identity']: line['identity'], f['product']: name,
+        fields = {f['identity']: line['identity'], self.product_field(board): name,
                   f['description']: description, f['quantity']: line['quantity'],
                   f['po_relation']: [master['record_id']], f['units']: (line.get('units') or '').strip() or 'Each'}
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
