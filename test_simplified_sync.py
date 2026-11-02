@@ -114,3 +114,41 @@ class CardAddressFromMasterTests(unittest.TestCase):
         cards.create('test',LINE)
         self.assertEqual(lark.cards[0]['Address'],'PO ship-to\nCity')
         self.assertIn('PO-EXAMPLE-1',lark.cards[0]['Address source']['text'])
+
+class InstantPOHeaderTests(unittest.TestCase):
+    def payload(self,**po):
+        base={'poId':'37358','poNumber':'PO6975','vendorId':'126','vendor':'Hannah','soNumber':'SO6889','customer':'Psychotic','shipTo':'Robert Johnson\nGlendora CA'}
+        base.update(po);return {'version':1,'account':'1','po':base}
+    def test_adds_row_once_then_reports_existing(self):
+        from netsuite_card_push import validate_po_header, upsert_po_header
+        lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
+        line=validate_po_header(self.payload(),'1')
+        self.assertEqual(upsert_po_header(cards,line)['status'],'Added to Master PO List')
+        self.assertEqual(lark.master[0]['fields']['Ship To Address'],'Robert Johnson\nGlendora CA')
+        self.assertEqual(lark.cards,[])  # never creates production cards
+        self.assertEqual(upsert_po_header(cards,line)['status'],'Already in Master PO List')
+        self.assertEqual(len(lark.master),1)
+    def test_rejects_bad_ids_and_account(self):
+        from netsuite_card_push import validate_po_header, PushError
+        for bad in [self.payload(poId='x'),dict(self.payload(),account='2'),self.payload(poNumber='')]:
+            with self.assertRaises(PushError):validate_po_header(bad,'1')
+    def test_route_requires_signature(self):
+        import os,hmac,hashlib,time,json as j
+        from flask import Flask
+        os.environ.update({'OM_CARD_PUSH_SECRET':'s'*40,'NETSUITE_ACCOUNT_ID':'1'})
+        import netsuite_card_push as m
+        app=Flask(__name__)
+        # minimal wiring: reuse the route body through a tiny app
+        lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
+        @app.post('/po')
+        def r():
+            from flask import request,jsonify
+            raw=request.get_data()
+            try:
+                m.authenticate(raw,request.headers.get('X-OM-Timestamp'),request.headers.get('X-OM-Signature'),os.environ['OM_CARD_PUSH_SECRET'])
+                return jsonify(m.upsert_po_header(cards,m.validate_po_header(j.loads(raw),'1')))
+            except m.PushError: return jsonify(error='x'),400
+        c=app.test_client();raw=j.dumps(self.payload()).encode();ts=str(int(time.time()))
+        sig=hmac.new(('s'*40).encode(),ts.encode()+b'.'+raw,hashlib.sha256).hexdigest()
+        self.assertEqual(c.post('/po',data=raw,headers={'X-OM-Timestamp':ts,'X-OM-Signature':'0'*64}).status_code,400)
+        self.assertEqual(c.post('/po',data=raw,headers={'X-OM-Timestamp':ts,'X-OM-Signature':sig}).get_json()['status'],'Added to Master PO List')

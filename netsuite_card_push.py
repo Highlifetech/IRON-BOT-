@@ -439,6 +439,42 @@ def validate_status_payload(payload, account):
     return keys
 
 
+def validate_po_header(payload, account):
+    if not isinstance(payload, dict) or payload.get('version') != 1 or payload.get('account') != account:
+        raise PushError('INVALID_ACCOUNT_OR_VERSION')
+    po = payload.get('po')
+    if not isinstance(po, dict):
+        raise PushError('INVALID_PO')
+    for field in ('poId', 'vendorId'):
+        if not isinstance(po.get(field), str) or not re.fullmatch(r'[1-9][0-9]*', po[field]):
+            raise PushError('INVALID_SOURCE_ID')
+    for field in ('poNumber', 'soNumber', 'vendor', 'customer', 'shipTo'):
+        value = po.get(field, '')
+        if value is None:
+            value = ''
+        if not isinstance(value, str) or len(value) > 10000:
+            raise PushError('INVALID_TEXT')
+        po[field] = value.strip()
+    if not po['poNumber']:
+        raise PushError('INVALID_PO')
+    return {'account': account, 'poId': po['poId'], 'poNumber': po['poNumber'], 'vendorId': po['vendorId'],
+            'vendor': po['vendor'], 'soNumber': po['soNumber'],
+            'customer': po['customer'] if po['soNumber'] else '', 'shipTo': po['shipTo']}
+
+
+def upsert_po_header(cards, line):
+    """Add the PO's Master PO List row, or fill a blank Ship To Address on an existing one."""
+    c = cards.catalog
+    existing = cards.search(c['base'], c['table'], c['po_id_field'], line['poId'])
+    if not existing:
+        cards.add_master(line)
+        return {'status': 'Added to Master PO List', 'po': line['poNumber']}
+    if line['shipTo'] and len(existing) == 1 and not existing[0].get('fields', {}).get('Ship To Address'):
+        cards.client.update_record_fields(c['table'], existing[0]['record_id'], {'Ship To Address': line['shipTo']}, app_token=c['base'])
+        return {'status': 'Ship To Address filled', 'po': line['poNumber']}
+    return {'status': 'Already in Master PO List', 'po': line['poNumber']}
+
+
 def card_status(key, prior, cards, boards):
     # Read only: never reserve a key, complete the ledger, create or update a card.
     if prior and prior.get('fingerprint','').startswith('group:') and not prior['record_id']:
@@ -544,6 +580,26 @@ def register(app):
         except Exception:
             app.logger.error('NetSuite board discovery disabled: setup failed')
             registry = None
+
+    @app.post('/integrations/netsuite/po')
+    def receive_netsuite_po():
+        """Instant Master PO List row when a PO is saved in NetSuite (user event).
+        Header only: never creates production cards, never edits a filled row."""
+        if request.content_length is None or request.content_length > 20000:
+            return jsonify(error='INVALID_REQUEST_SIZE'), 413
+        raw = request.get_data()
+        try:
+            authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
+            payload = json.loads(raw)
+            line = validate_po_header(payload, os.environ.get('NETSUITE_ACCOUNT_ID'))
+        except (PushError, ValueError, TypeError) as error:
+            app.logger.warning('NetSuite PO header rejected: %s', error if isinstance(error, PushError) else 'INVALID_JSON')
+            return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
+        try:
+            return jsonify(upsert_po_header(cards, line))
+        except Exception as error:
+            app.logger.warning('NetSuite PO header unconfirmed: %s', error if isinstance(error, PushError) else type(error).__name__)
+            return jsonify(error='PO_SYNC_UNCONFIRMED'), 503
 
     @app.post('/integrations/netsuite/cards/boards')
     def list_netsuite_card_boards():
