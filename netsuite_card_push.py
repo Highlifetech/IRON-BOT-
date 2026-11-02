@@ -433,6 +433,14 @@ def register(app):
             review=None
             cards.review_config={}
 
+    # Every new NetSuite PO gets a Master PO List row, card or not.
+    try:
+        from netsuite_po_sync import start_from_env
+        po_sync = start_from_env(cards)
+    except Exception:
+        app.logger.error('NetSuite PO sync disabled: setup failed')
+        po_sync = None
+
     # Board discovery: any table in the catalog Base that carries the NetSuite
     # sync fields becomes a board without editing OM_CARD_PUSH_BOARDS. Needs the
     # review extension, because every board must also have review config.
