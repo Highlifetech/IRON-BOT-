@@ -100,6 +100,9 @@ def validate_payload(payload, boards, account):
         for field in ('product', 'description', 'units', 'poNumber', 'soNumber', 'customer', 'vendor'):
             if not isinstance(line.get(field), str) or len(line[field]) > 20000:
                 raise PushError('INVALID_TEXT')
+        for field in ('productName', 'sizes', 'variant'):  # optional NetSuite line columns
+            if field in line and line[field] is not None and (not isinstance(line[field], str) or len(line[field]) > 20000):
+                raise PushError('INVALID_TEXT')
         validate_so_ship_to(line)
         if not line['product'].strip():
             raise PushError('MISSING_PRODUCT')
@@ -114,7 +117,29 @@ def starting_name_and_description(line):
     product = (line.get('product') or '').strip()
     description = (line.get('description') or '').strip() or product
     first = next((l.strip() for l in description.splitlines() if l.strip()), '')
-    return (first or product)[:200], description
+    name = (line.get('productName') or '').strip() or first or product
+    variant = (line.get('variant') or '').strip()
+    if variant and variant.lower() not in name.lower():
+        name = f'{name} – {variant}'
+    return name[:200], description
+
+
+def parse_sizes(text):
+    """'S 40, M 60' / 'S:40; M:60' / one per line -> [('S', 40), ('M', 60)].
+
+    The last whole number in each chunk is the quantity; the rest is the size.
+    Chunks that don't parse are returned separately so nothing is silently lost."""
+    rows, bad = [], []
+    for chunk in re.split(r'[,;\n|]+', text or ''):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = re.fullmatch(r'(.+?)\s*[:=\-x×]?\s*(\d+)', chunk)
+        if not m or not m.group(1).strip(' :=-x×'):
+            bad.append(chunk)
+            continue
+        rows.append((m.group(1).strip(' :=-x×')[:40], int(m.group(2))))
+    return rows, bad
 
 
 class PostgresLedger:
@@ -315,7 +340,38 @@ class LarkCards:
         result = self.client.create_record(b['table'], fields, app_token=b['base'])
         if not re.fullmatch(r'rec[A-Za-z0-9]+', result.get('record_id', '')):
             raise PushError('CREATE_RESULT_UNCONFIRMED')
+        result['sizes'] = self.add_sizes(board, result['record_id'], line)
         return result
+
+    def add_sizes(self, board, record_id, line):
+        """Starting Variants rows from the NetSuite Sizes column. Editable after.
+        Never fails the card: a problem is reported in the result instead."""
+        rows, bad = parse_sizes(line.get('sizes') or '')
+        if not rows:
+            return 'Sizes not readable: ' + ', '.join(bad) if bad else ''
+        v = (self.review_config.get(board) or {}).get('variants')
+        if not v:
+            return 'Sizes not added — board has no Variants table'
+        base = self.boards[board]['base']
+        color = (line.get('variant') or '').strip()
+        made = 0
+        for size, qty in rows:
+            fields = {v['size']: size, v['quantity']: qty, v['parent']: [record_id]}
+            try:
+                self.client.create_record(v['table'], dict(fields, **({'Color': color} if color else {})), app_token=base)
+            except Exception:
+                try:
+                    self.client.create_record(v['table'], fields, app_token=base)
+                except Exception:
+                    continue
+            made += 1
+        note = f'{made} size rows added'
+        total = sum(q for _, q in rows)
+        if isinstance(line.get('quantity'), (int, float)) and total != line['quantity']:
+            note += f' — sizes total {total}, line qty {line["quantity"]:g}'
+        if bad:
+            note += ' — not readable: ' + ', '.join(bad)
+        return note
 
     def url(self, board, record_id):
         b = self.boards[board]
@@ -351,7 +407,10 @@ def process(line, ledger, cards):
         return {'identity': key, 'status': 'Needs review — prior send unconfirmed', 'url': None}
     result = cards.create(board, line)
     ledger.complete(key, result['record_id'])
-    return {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
+    out = {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
+    if result.get('sizes'):
+        out['sizesStatus'] = result['sizes']
+    return out
 
 
 def validate_status_payload(payload, account):

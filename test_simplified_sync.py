@@ -67,3 +67,28 @@ class LineSyncOffTests(unittest.TestCase):
         self.assertIn('Line sync off',r.get_json()['results'][0]['status'])
 
 if __name__=='__main__':unittest.main()
+
+class ProductNameAndSizesTests(unittest.TestCase):
+    def setUp(self):
+        from netsuite_card_push import parse_sizes
+        self.parse=parse_sizes
+    def test_product_name_column_wins_and_color_appended(self):
+        l=dict(LINE,productName='Womens Performance Shorts',variant='Black',description='Quick-dry\nlogo left leg')
+        self.assertEqual(starting_name_and_description(l),('Womens Performance Shorts – Black','Quick-dry\nlogo left leg'))
+    def test_color_not_doubled(self):
+        self.assertEqual(starting_name_and_description(dict(LINE,productName='Shorts – Black',variant='black'))[0],'Shorts – Black')
+    def test_parse_formats(self):
+        self.assertEqual(self.parse('S 40, M 60, L 60, XL 40')[0],[('S',40),('M',60),('L',60),('XL',40)])
+        self.assertEqual(self.parse('0 30; 2 60\n4:120')[0],[('0',30),('2',60),('4',120)])
+        self.assertEqual(self.parse('2XL-15, One Size 100')[0],[('2XL',15),('One Size',100)])
+        rows,bad=self.parse('S 40, oops');self.assertEqual((rows,bad),([('S',40)],['oops']))
+    def test_card_gets_variant_rows_with_color_and_total_check(self):
+        lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
+        cards.review_config={'test':{'variants':{'table':'variants','identity':'K','size':'Size','quantity':'Quantity','parent':'Card'}}}
+        res=cards.create('test',dict(LINE,quantity=200,variant='Black',sizes='S 40, M 60, L 60, XL 30'))
+        rows=[f for f in lark.cards if 'Size' in f]
+        self.assertEqual([(r['Size'],r['Quantity'],r['Color']) for r in rows],[('S',40,'Black'),('M',60,'Black'),('L',60,'Black'),('XL',30,'Black')])
+        self.assertIn('sizes total 190, line qty 200',res['sizes'])
+    def test_no_variants_table_still_creates_card(self):
+        lark=FakeLark();res=LarkCards(lark,BOARDS,CATALOG).create('test',dict(LINE,sizes='S 1'))
+        self.assertEqual(len(lark.cards),1);self.assertIn('no Variants table',res['sizes'])
