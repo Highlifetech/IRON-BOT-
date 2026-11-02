@@ -1,7 +1,7 @@
 /**
  * OM — PO to Master PO List (instant)
  * User event on Purchase Order, afterSubmit (create + edit).
- * Sends the PO header to Iron Bot, which adds/fills the Lark Master PO List row.
+ * Sends the PO header + product lines to Iron Bot: Master PO List row + one PO Lines row per item.
  * Header only: no production cards are created. Failures never block saving the PO.
  *
  * Script parameters:
@@ -37,6 +37,30 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/log'],
         // A PO address counts only if it has a street line (more than name + country).
         const shipTo = (poShip.split('\n').filter(Boolean).length >= 3) ? poShip : soShip;
 
+        // Product lines only (no shipping, fees, setup/mold, tax or discount lines).
+        const SKIP_TYPES = ['Service', 'OthCharge', 'Discount', 'Markup', 'Subtotal', 'Description', 'Payment', 'ShipItem', 'TaxItem', 'TaxGroup'];
+        const SKIP_NAME = /shipping|freight|fee|setup|mold|tax|discount|duty|tariff/i;
+        const lines = [];
+        const n = po.getLineCount({ sublistId: 'item' });
+        for (let i = 0; i < n && lines.length < 200; i++) {
+          const get = (f) => po.getSublistValue({ sublistId: 'item', fieldId: f, line: i });
+          const itemType = text(get('itemtype'));
+          const itemName = text(po.getSublistText({ sublistId: 'item', fieldId: 'item', line: i }));
+          if (SKIP_TYPES.includes(itemType) || SKIP_NAME.test(itemName)) continue;
+          const key = text(get('lineuniquekey'));
+          if (!/^[1-9][0-9]*$/.test(key)) continue;
+          const qty = Number(get('quantity'));
+          lines.push({
+            lineKey: key,
+            productName: text(get('custcol_om_product_name')),
+            description: text(get('custcol_sales_order_description')) || text(get('description')),
+            variant: text(get('custcol_om_variant')),
+            sizes: text(get('custcol_om_sizes')),
+            quantity: isFinite(qty) ? qty : null,
+            units: text(po.getSublistText({ sublistId: 'item', fieldId: 'units', line: i }))
+          });
+        }
+
         const body = JSON.stringify({
           version: 1,
           account: runtime.accountId,
@@ -45,7 +69,8 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/log'],
             vendorId: String(po.getValue('entity')),
             vendor: text(po.getText('entity')),
             soNumber, customer, shipTo
-          }
+          },
+          lines
         });
 
         const script = runtime.getCurrentScript();

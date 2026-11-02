@@ -457,22 +457,74 @@ def validate_po_header(payload, account):
         po[field] = value.strip()
     if not po['poNumber']:
         raise PushError('INVALID_PO')
+    lines = []
+    raw_lines = payload.get('lines') or []
+    if not isinstance(raw_lines, list) or len(raw_lines) > 200:
+        raise PushError('INVALID_LINES')
+    for l in raw_lines:
+        if not isinstance(l, dict) or not re.fullmatch(r'[1-9][0-9]*', str(l.get('lineKey', ''))):
+            raise PushError('INVALID_LINE')
+        clean = {'lineKey': str(l['lineKey'])}
+        for f in ('productName', 'description', 'variant', 'sizes', 'units'):
+            v = l.get(f) or ''
+            if not isinstance(v, str) or len(v) > 10000:
+                raise PushError('INVALID_TEXT')
+            clean[f] = v.strip()
+        q = l.get('quantity')
+        clean['quantity'] = q if isinstance(q, (int, float)) and not isinstance(q, bool) else None
+        lines.append(clean)
     return {'account': account, 'poId': po['poId'], 'poNumber': po['poNumber'], 'vendorId': po['vendorId'],
             'vendor': po['vendor'], 'soNumber': po['soNumber'],
-            'customer': po['customer'] if po['soNumber'] else '', 'shipTo': po['shipTo']}
+            'customer': po['customer'] if po['soNumber'] else '', 'shipTo': po['shipTo'], 'lines': lines}
+
+
+PO_LINES_TABLE = os.environ.get('OM_PO_LINES_TABLE', 'tbl9dLxLGfKJemQy')
+
+
+def line_identity(account, po_id, line_key):
+    return f'{account}:purchaseorder:{po_id}:{line_key}'
+
+
+def upsert_po_lines(cards, line, master_id):
+    """One PO Lines row per product line, linked to the PO. Bot-owned mirror of NetSuite."""
+    if not line.get('lines') or not PO_LINES_TABLE:
+        return 0
+    base = cards.catalog['base']
+    done = 0
+    for l in line['lines']:
+        key = line_identity(line['account'], line['poId'], l['lineKey'])
+        name = l['productName'] or next((x.strip() for x in l['description'].splitlines() if x.strip()), '')
+        if l['variant'] and l['variant'].lower() not in name.lower():
+            name = f"{name} – {l['variant']}"
+        fields = {'Line': f"{line['poNumber']} · {name}"[:200], 'PO': [master_id], 'NetSuite line ID': key,
+                  'Product Name': l['productName'], 'Description': l['description'], 'Variant': l['variant'],
+                  'Sizes': l['sizes'], 'Unit': l['units'] or 'Each'}
+        if l['quantity'] is not None:
+            fields['Quantity'] = l['quantity']
+        rows = cards.search(base, PO_LINES_TABLE, 'NetSuite line ID', key)
+        if rows:
+            cards.client.update_record_fields(PO_LINES_TABLE, rows[0]['record_id'], fields, app_token=base)
+        else:
+            cards.client.create_record(PO_LINES_TABLE, fields, app_token=base)
+        done += 1
+    return done
 
 
 def upsert_po_header(cards, line):
-    """Add the PO's Master PO List row, or fill a blank Ship To Address on an existing one."""
+    """Add the PO's Master PO List row (or fill a blank Ship To Address), then mirror its lines."""
     c = cards.catalog
     existing = cards.search(c['base'], c['table'], c['po_id_field'], line['poId'])
     if not existing:
-        cards.add_master(line)
-        return {'status': 'Added to Master PO List', 'po': line['poNumber']}
-    if line['shipTo'] and len(existing) == 1 and not existing[0].get('fields', {}).get('Ship To Address'):
-        cards.client.update_record_fields(c['table'], existing[0]['record_id'], {'Ship To Address': line['shipTo']}, app_token=c['base'])
-        return {'status': 'Ship To Address filled', 'po': line['poNumber']}
-    return {'status': 'Already in Master PO List', 'po': line['poNumber']}
+        master = cards.add_master(line)[0]
+        status = 'Added to Master PO List'
+    else:
+        master = existing[0]
+        status = 'Already in Master PO List'
+        if line['shipTo'] and len(existing) == 1 and not existing[0].get('fields', {}).get('Ship To Address'):
+            cards.client.update_record_fields(c['table'], existing[0]['record_id'], {'Ship To Address': line['shipTo']}, app_token=c['base'])
+            status = 'Ship To Address filled'
+    lines = upsert_po_lines(cards, line, master['record_id'])
+    return {'status': status, 'po': line['poNumber'], 'lines': lines}
 
 
 def card_status(key, prior, cards, boards):
@@ -558,6 +610,15 @@ def register(app):
             app.logger.error('NetSuite review extension disabled: invalid configuration')
             review=None
             cards.review_config={}
+
+    # Cards linked to a PO by hand get filled from that PO's lines (empty fields only).
+    if os.environ.get('OM_CARD_FILL_ENABLED', 'true') == 'true':
+        try:
+            from netsuite_card_fill import CardFiller
+            CardFiller(cards, os.environ.get('NETSUITE_ACCOUNT_ID', '')).start(
+                interval=int(os.environ.get('OM_CARD_FILL_INTERVAL', '60')))
+        except Exception:
+            app.logger.error('Card fill disabled: setup failed')
 
     # Every new NetSuite PO gets a Master PO List row, card or not.
     try:
