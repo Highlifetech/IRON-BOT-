@@ -112,14 +112,14 @@ def validate_payload(payload, boards, account):
 def starting_name_and_description(line):
     """Card starting values. The team edits them in Lark afterwards; never re-synced.
 
-    The full NetSuite description is pasted as-is into Product Description, and
-    the card title is line 1 of that same description so the two always match."""
+    The full NetSuite description is pasted as-is into Product Description. The
+    card title is the NetSuite Product Name (+ variant) only; when a line has no
+    Product Name the title is left blank for the team to type."""
     product = (line.get('product') or '').strip()
     description = (line.get('description') or '').strip() or product
-    first = next((l.strip() for l in description.splitlines() if l.strip()), '')
-    name = (line.get('productName') or '').strip() or first or product
+    name = (line.get('productName') or '').strip()
     variant = (line.get('variant') or '').strip()
-    if variant and variant.lower() not in name.lower():
+    if name and variant and variant.lower() not in name.lower():
         name = f'{name} – {variant}'
     return name[:200], description
 
@@ -339,9 +339,11 @@ class LarkCards:
         master = self.master(board, line, allow_add=True)
         f = b['fields']
         name, description = starting_name_and_description(line)
-        fields = {f['identity']: line['identity'], self.product_field(board): name,
+        fields = {f['identity']: line['identity'],
                   f['description']: description, f['quantity']: line['quantity'],
                   f['po_relation']: [master['record_id']], f['units']: (line.get('units') or '').strip() or 'Each'}
+        if name:
+            fields[self.product_field(board)] = name
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
         if f.get('po_link') and f['po_link'] != f['po_relation']:
             fields[f['po_link']] = [master['record_id']]
