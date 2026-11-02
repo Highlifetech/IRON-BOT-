@@ -1,4 +1,8 @@
-"""Opt-in NetSuite → Lark card creation. No NetSuite writes or catalog upserts.
+"""Opt-in NetSuite → Lark card creation. No NetSuite writes.
+
+When a PO is not yet in the Master PO List (the AnyCross catalog sync runs on
+a delay), the bot adds a minimal header row keyed by NetSuite PO ID so the
+card can link to it. Existing catalog rows are never modified.
 
 Install SQL migration and verify field mappings before enabling. This module is
 inert unless register() is called with OM_CARD_PUSH_ENABLED=true. Authentication
@@ -10,6 +14,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from contextlib import closing
@@ -142,11 +147,76 @@ class PostgresLedger:
                     raise PushError('LEDGER_CONFLICT')
 
 
+# Plain-language reasons shown on the NetSuite Send to Lark page.
+FRIENDLY_REASONS = {
+    'PO_NOT_IN_MASTER_REFRESH_CATALOG': 'PO not synced to Lark yet — try again in a few minutes',
+    'MASTER_CATALOG_ADD_FAILED': 'Could not add PO to the Master PO List — try again',
+    'MASTER_HEADER_CHANGED_REFRESH_AND_REVIEW': 'PO, vendor or SO changed since the Master PO List row was made — check that row',
+    'MASTER_CUSTOMER_REQUIRES_REVIEW': 'PO has no Sales Order but the Master PO List row has a customer — check that row',
+    'DUPLICATE_SOURCE_MAPPING': 'PO or line appears more than once in Lark — remove the duplicate',
+    'CROSS_BASE_RELATION_NOT_CONFIGURED': 'Board is in a different Lark base — not supported',
+    'ADDRESS_FIELDS_NOT_CONFIGURED': 'Board has no ship-to address fields set up',
+    'LARK_READ_FAILED': 'Lark could not be read — try again',
+    'CREATE_RESULT_UNCONFIRMED': 'Lark did not confirm the new card — check the board before retrying',
+    'LEDGER_CONFLICT': 'Card link changed in Lark — check the board',
+    'VARIANT_PARENT_REQUIRES_REVIEW': 'Size/variant row is linked to the wrong card — check the board',
+}
+
+
+def friendly_reason(error):
+    code = str(error) if isinstance(error, PushError) else ''
+    if code in FRIENDLY_REASONS:
+        return 'Needs review — ' + FRIENDLY_REASONS[code]
+    return 'Needs review — send unconfirmed' + (f' ({code})' if code else '')
+
+
 class LarkCards:
     def __init__(self, client, boards, catalog):
         self.client, self.boards, self.catalog = client, boards, catalog
         self.review_config = {}
         self.address_config = {}
+        self._catalog_lock = threading.Lock()
+        self._catalog_added = {}
+
+    def add_master(self, line):
+        """Add a header row for a PO the catalog sync has not written yet.
+
+        Serialized and re-checked so two lines of the same PO (or two clicks)
+        never create two rows. Never edits an existing row."""
+        c = self.catalog
+        with self._catalog_lock:
+            cached = self._catalog_added.get(line['poId'])
+            # Short-lived: only bridges Lark search lag right after the add.
+            if cached and time.time() - cached[0] < 600:
+                return [cached[1]]
+            rows = self.search(c['base'], c['table'], c['po_id_field'], line['poId'])
+            if rows:
+                return rows
+            account = line['account']
+            host = account.lower().replace('_', '-') if re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?', account) else None
+            fields = {c['po_id_field']: line['poId'], 'PO': line['poNumber'],
+                      'NetSuite Supplier ID': line['vendorId'], 'Sales Order': line['soNumber']}
+            optional = {'Supplier': line.get('vendor', ''), 'Customer': line.get('customer', '') if line['soNumber'] else '',
+                        'NetSuite lookup status': 'Matched',
+                        'NetSuite lookup message': f"Added by Iron Bot from NetSuite PO {line['poId']} on Send to Lark (catalog sync had not run yet).",
+                        'Last NetSuite sync': int(time.time() * 1000)}
+            if host:
+                optional['Open in NetSuite'] = {'text': line['poNumber'],
+                    'link': f"https://{host}.app.netsuite.com/app/accounting/transactions/purchord.nl?id={line['poId']}"}
+            for name in c.get('add_fields', list(optional)):
+                if name in optional and optional[name] not in ('', None):
+                    fields[name] = optional[name]
+            try:
+                result = self.client.create_record(c['table'], fields, app_token=c['base'])
+            except Exception:
+                # Some optional columns may be renamed; retry with only the key fields.
+                result = self.client.create_record(c['table'], {k: fields[k] for k in (c['po_id_field'], 'PO', 'NetSuite Supplier ID', 'Sales Order')}, app_token=c['base'])
+            rid = result.get('record_id', '') if isinstance(result, dict) else ''
+            if not re.fullmatch(r'rec[A-Za-z0-9]+', rid):
+                raise PushError('MASTER_CATALOG_ADD_FAILED')
+            row = {'record_id': rid, 'fields': fields}
+            self._catalog_added[line['poId']] = (time.time(), row)
+            return [row]
 
     def search(self, base, table, field, value):
         path = f'/open-apis/bitable/v1/apps/{base}/tables/{table}/records/search'
@@ -176,9 +246,11 @@ class LarkCards:
         if response.get('code')!=0: raise PushError('VARIANT_PARENT_UNAVAILABLE')
         return [response['data']['record']]
 
-    def master(self, board, line):
+    def master(self, board, line, allow_add=False):
         b, c = self.boards[board], self.catalog
         master = self.search(c['base'], c['table'], c['po_id_field'], line['poId'])
+        if not master and allow_add and c.get('auto_add', True):
+            master = self.add_master(line)
         if len(master) != 1:
             raise PushError('PO_NOT_IN_MASTER_REFRESH_CATALOG')
         def text(value):
@@ -200,7 +272,7 @@ class LarkCards:
 
     def create(self, board, line):
         b = self.boards[board]
-        master = self.master(board, line)
+        master = self.master(board, line, allow_add=True)
         f = b['fields']
         fields = {f['identity']: line['identity'], f['product']: line['product'],
                   f['description']: line['description'], f['quantity']: line['quantity'],
@@ -451,5 +523,5 @@ def register(app):
                 reason = str(error) if isinstance(error, PushError) else type(error).__name__
                 app.logger.warning('NetSuite card send requires review: %s', reason)
                 # Never leak raw API/database errors; a signed retry only reconciles.
-                results.append({'identity': line['identity'], 'status': 'Needs review — send unconfirmed', 'url': None})
+                results.append({'identity': line['identity'], 'status': friendly_reason(error), 'url': None})
         return jsonify(results=results)

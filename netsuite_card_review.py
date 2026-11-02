@@ -330,11 +330,20 @@ class ReviewService:
 
     def missing(self,key,reason):
         old=self.ledger.lookup_many([key]).get(key)
-        if not old or not old.get('record_id'): raise PushError('NO_CONFIRMED_CARD')
-        allowed={'Source PO unavailable — check NetSuite access or deletion','Previously linked line no longer on PO — review required','Source comparison unavailable — review required'}
-        if reason not in allowed: raise PushError('INVALID_REASON')
+        # Nothing was ever confirmed in Lark for this line: nothing to flag.
+        # Answer normally so the NetSuite monitor stops retrying it every run.
+        if not old or not old.get('record_id'): return {'status':'No confirmed card — nothing to flag'}
+        if not isinstance(reason,str) or not reason.strip() or len(reason)>300 or any(ord(ch)<32 for ch in reason):
+            raise PushError('INVALID_REASON')
+        if old['board'] not in self.cards.boards:
+            return {'status':'Original board no longer enabled — nothing flagged'}
         # Never infer cancellation/deletion from an access failure, and never clear source values.
-        self.read(old['board'],old['record_id'])
+        try:
+            self.read(old['board'],old['record_id'])
+        except PushError as error:
+            if str(error) in ('LINKED_RECORD_READ_FAILED_1254043','LINKED_RECORD_UNAVAILABLE'):
+                return {'status':'Linked card no longer in Lark — nothing flagged'}
+            raise
         with self.store.transaction(key.split(':')[0]+':'+key.split(':')[2]) as cur:
             prior=self.store.get(cur,key)
             cur.execute('''INSERT INTO om_ns_card_sources(identity,board,record_id,variant_id,observed,checked_at)
@@ -414,7 +423,12 @@ def register_routes(app, service, authorize):
                 except PushError as e:
                     results.append({'identity':line['identity'],'status':str(e),'url':None})
             return jsonify(results=results)
-        except (PushError,ValueError,TypeError): return jsonify(error='INVALID_REVIEW_REQUEST'),400
+        except PushError as error:
+            app.logger.warning('NetSuite review %s rejected: %s', action, error)
+            return jsonify(error='INVALID_REVIEW_REQUEST', reason=str(error)),400
+        except (ValueError,TypeError) as error:
+            app.logger.warning('NetSuite review %s rejected: %s', action, type(error).__name__)
+            return jsonify(error='INVALID_REVIEW_REQUEST'),400
         except Exception:
             app.logger.warning('NetSuite review operation unconfirmed')
             return jsonify(error='REVIEW_OPERATION_UNCONFIRMED'),503
