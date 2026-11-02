@@ -13,6 +13,8 @@ A PO with several lines: the card takes the next line that no card has yet
 identity, so it is never filled again and Send to Lark sees it as existing.
 Nothing is ever written back to NetSuite.
 """
+import os
+from datetime import datetime
 import logging
 import re
 import threading
@@ -59,14 +61,27 @@ def po_lines_from_rows(rows):
     return sorted(lines, key=lambda l: int(l['lineKey']))
 
 
+def _since_ms():
+    raw = (os.environ.get('OM_CARD_FILL_SINCE') or '2026-11-02T19:11:00Z').strip()
+    if raw.isdigit():
+        return int(raw)
+    return int(datetime.fromisoformat(raw.replace('Z', '+00:00')).timestamp() * 1000)
+
+
+FILL_SINCE_MS = _since_ms()
+
+
 class CardFiller:
-    def __init__(self, cards, account):
+    def __init__(self, cards, account, since_ms=None):
         self.cards, self.account = cards, account
+        # Only cards created after this moment are filled; older cards are never touched.
+        self.since_ms = FILL_SINCE_MS if since_ms is None else since_ms
         self._assigned = set()  # line keys handed out this run (Lark search can lag writes)
 
-    def _search(self, base, table, conditions, page_size=50):
+    def _search(self, base, table, conditions, page_size=50, newest_first=False):
         body = {'filter': {'conjunction': 'and', 'conditions': conditions},
-                'sort': [{'field_name': 'Created', 'desc': False}]}
+                'sort': [{'field_name': 'Created', 'desc': newest_first}],
+                'automatic_fields': True}
         r = self.cards.client._post(f'/open-apis/bitable/v1/apps/{base}/tables/{table}/records/search',
                                     body=body, params={'page_size': page_size})
         if r.get('code') != 0:
@@ -104,9 +119,11 @@ class CardFiller:
         rows = self._search(b['base'], b['table'], [
             {'field_name': f['po_relation'], 'operator': 'isNotEmpty', 'value': []},
             {'field_name': f['identity'], 'operator': 'isEmpty', 'value': []},
-        ])
+        ], newest_first=True)
         filled = 0
         for row in rows:
+            if not self.is_new(row):
+                continue
             try:
                 if self.fill_card(board, row):
                     filled += 1
@@ -114,6 +131,13 @@ class CardFiller:
                 log.warning('Card fill skipped %s on %s: %s', row.get('record_id'), board,
                             error if isinstance(error, PushError) else type(error).__name__)
         return filled
+
+    def is_new(self, row):
+        try:
+            created = int(row.get('created_time') or 0)
+        except (TypeError, ValueError):
+            created = 0
+        return created > self.since_ms
 
     def fill_card(self, board, row):
         b = self.cards.boards[board]

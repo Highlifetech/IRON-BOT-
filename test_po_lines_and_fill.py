@@ -59,9 +59,11 @@ class FillTests(unittest.TestCase):
         self.cards.review_config={'b':{'issue':'Sync issue','variants':{'table':'variants','identity':'K','size':'Size','quantity':'Quantity','parent':'Card'}}}
         upsert_po_header(self.cards,validate_po_header(payload(LINES),'1'))
         self.master=self.lark.t['master'][0]['record_id']
-        self.f=CardFiller(self.cards,'1')
-    def card(self,**fields):
-        return self.lark.create_record('cards',dict({'Select PO':[self.master]},**fields))['record_id']
+        self.f=CardFiller(self.cards,'1',since_ms=1000)
+    def card(self,created=2000,**fields):
+        r=self.lark.create_record('cards',dict({'Select PO':[self.master]},**fields))
+        row=next(x for x in self.lark.t['cards'] if x['record_id']==r['record_id']);row['created_time']=created
+        return r['record_id']
     def get(self,rid): return next(r['fields'] for r in self.lark.t['cards'] if r['record_id']==rid)
     def test_picking_po_fills_empty_fields_and_sizes(self):
         rid=self.card();self.f.run_once();c=self.get(rid)
@@ -86,5 +88,11 @@ class FillTests(unittest.TestCase):
     def test_card_from_send_to_lark_is_not_refilled(self):
         rid=self.card(Key='1:purchaseorder:37358:101',Products='From button');self.f.run_once()
         self.assertEqual(self.get(rid)['Products'],'From button')
+
+    def test_cards_made_before_the_cutoff_are_never_touched(self):
+        old=self.card(created=500);self.f.run_once();c=self.get(old)
+        self.assertNotIn('Products',c);self.assertNotIn('Address',c);self.assertNotIn('Key',c)
+        new=self.card();self.f.run_once()
+        self.assertEqual(self.get(new)['Key'],'1:purchaseorder:37358:101')
 
 if __name__=='__main__':unittest.main()
