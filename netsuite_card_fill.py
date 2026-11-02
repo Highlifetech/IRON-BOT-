@@ -184,8 +184,9 @@ class CardFiller:
 
         update[f['identity']] = f"{self.account}:purchaseorder:{po_id}:{line['lineKey']}"
         self._assigned.add(update[f['identity']])
-        if name and empty(f['product']):
-            update[f['product']] = name
+        product_field = self.cards.product_field(board)
+        if name and empty(product_field):
+            update[product_field] = name
         if description and empty(f['description']):
             update[f['description']] = description
         qty = line.get('quantity')
