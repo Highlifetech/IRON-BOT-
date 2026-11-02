@@ -5,23 +5,22 @@ from test_catalog_autoadd import FakeLark, BOARDS, CATALOG
 from test_netsuite_card_push import LINE
 
 class StartingValuesTests(unittest.TestCase):
-    def test_line_one_is_name_rest_is_specs(self):
+    def test_full_description_pasted_and_name_is_line_one(self):
         d='Heavyweight Logo Hoodie\n400gsm cotton fleece\nPuff print back'
-        self.assertEqual(starting_name_and_description(dict(LINE,product=d,description=d)),
-                         ('Heavyweight Logo Hoodie','400gsm cotton fleece\nPuff print back'))
-    def test_single_line_description_becomes_name_only(self):
-        self.assertEqual(starting_name_and_description(dict(LINE,product='Beanie Black Patch',description='Beanie Black Patch')),('Beanie Black Patch',''))
-    def test_distinct_product_name_kept(self):
-        self.assertEqual(starting_name_and_description(dict(LINE,product='Hoodie',description='Specs here')),('Hoodie','Specs here'))
+        self.assertEqual(starting_name_and_description(dict(LINE,product=d,description=d)),('Heavyweight Logo Hoodie',d))
+    def test_single_line(self):
+        self.assertEqual(starting_name_and_description(dict(LINE,product='Beanie',description='Beanie')),('Beanie','Beanie'))
     def test_blank_lines_skipped(self):
-        self.assertEqual(starting_name_and_description(dict(LINE,product='',description='\n\nCap\nspecs'))[0],'Cap')
+        self.assertEqual(starting_name_and_description(dict(LINE,product='',description='\n\nCap\nspecs')),('Cap','Cap\nspecs'))
+    def test_no_description_falls_back_to_product(self):
+        self.assertEqual(starting_name_and_description(dict(LINE,product='Hat',description='')),('Hat','Hat'))
 
 class CardCreateTests(unittest.TestCase):
     def test_card_gets_split_name_and_each_fallback(self):
         lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
         cards.create('test',dict(LINE,product='Cap\nBrass buckle',description='Cap\nBrass buckle',units=''))
         c=lark.cards[0]
-        self.assertEqual((c['Products'],c['Description'],c['Unit']),('Cap','Brass buckle','Each'))
+        self.assertEqual((c['Products'],c['Description'],c['Unit']),('Cap','Cap\nBrass buckle','Each'))
     def test_master_row_gets_ship_to_from_sender(self):
         lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
         so={'soId':'5','soNumber':LINE['soNumber'],'status':'AVAILABLE','address':'Robert Johnson\nGlendora CA'}

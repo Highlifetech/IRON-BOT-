@@ -109,19 +109,12 @@ def validate_payload(payload, boards, account):
 def starting_name_and_description(line):
     """Card starting values. The team edits them in Lark afterwards; never re-synced.
 
-    Convention: line 1 of the NetSuite description is the product name, the
-    lines below are specs. If the sender passed a distinct product name, keep it."""
+    The full NetSuite description is pasted as-is into Product Description, and
+    the card title is line 1 of that same description so the two always match."""
     product = (line.get('product') or '').strip()
-    description = (line.get('description') or '').strip()
-    if product and product != description:
-        return product[:200], description
-    text = description or product
-    lines = [l.strip() for l in text.splitlines()]
-    while lines and not lines[0]:
-        lines.pop(0)
-    if not lines:
-        return product[:200], description
-    return lines[0][:200], '\n'.join(lines[1:]).strip()
+    description = (line.get('description') or '').strip() or product
+    first = next((l.strip() for l in description.splitlines() if l.strip()), '')
+    return (first or product)[:200], description
 
 
 class PostgresLedger:
