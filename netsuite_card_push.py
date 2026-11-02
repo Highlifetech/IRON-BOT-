@@ -106,6 +106,24 @@ def validate_payload(payload, boards, account):
     return lines
 
 
+def starting_name_and_description(line):
+    """Card starting values. The team edits them in Lark afterwards; never re-synced.
+
+    Convention: line 1 of the NetSuite description is the product name, the
+    lines below are specs. If the sender passed a distinct product name, keep it."""
+    product = (line.get('product') or '').strip()
+    description = (line.get('description') or '').strip()
+    if product and product != description:
+        return product[:200], description
+    text = description or product
+    lines = [l.strip() for l in text.splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    if not lines:
+        return product[:200], description
+    return lines[0][:200], '\n'.join(lines[1:]).strip()
+
+
 class PostgresLedger:
     """A committed unique key owns the sole create attempt, even after a crash."""
     def __init__(self, dsn):
@@ -196,7 +214,11 @@ class LarkCards:
             host = account.lower().replace('_', '-') if re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?', account) else None
             fields = {c['po_id_field']: line['poId'], 'PO': line['poNumber'],
                       'NetSuite Supplier ID': line['vendorId'], 'Sales Order': line['soNumber']}
+            ship_to = line.get('shipTo') or ''
+            if not ship_to and isinstance(line.get('soShipTo'), dict) and line['soShipTo'].get('status') == 'AVAILABLE':
+                ship_to = line['soShipTo'].get('address') or ''
             optional = {'Supplier': line.get('vendor', ''), 'Customer': line.get('customer', '') if line['soNumber'] else '',
+                        'Ship To Address': ship_to,
                         'NetSuite lookup status': 'Matched',
                         'NetSuite lookup message': f"Added by Iron Bot from NetSuite PO {line['poId']} on Send to Lark (catalog sync had not run yet).",
                         'Last NetSuite sync': int(time.time() * 1000)}
@@ -274,9 +296,10 @@ class LarkCards:
         b = self.boards[board]
         master = self.master(board, line, allow_add=True)
         f = b['fields']
-        fields = {f['identity']: line['identity'], f['product']: line['product'],
-                  f['description']: line['description'], f['quantity']: line['quantity'],
-                  f['po_relation']: [master['record_id']], f['units']: line['units']}
+        name, description = starting_name_and_description(line)
+        fields = {f['identity']: line['identity'], f['product']: name,
+                  f['description']: description, f['quantity']: line['quantity'],
+                  f['po_relation']: [master['record_id']], f['units']: (line.get('units') or '').strip() or 'Each'}
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
         if f.get('po_link') and f['po_link'] != f['po_relation']:
             fields[f['po_link']] = [master['record_id']]
@@ -284,9 +307,10 @@ class LarkCards:
         for name, value in (b.get('initial_fields') or {}).items():
             fields.setdefault(name, value)
         ship_to = validate_so_ship_to(line)
-        if ship_to and ship_to['status']=='AVAILABLE':
-            cfg = self.address_config.get(board)
-            if not cfg: raise PushError('ADDRESS_FIELDS_NOT_CONFIGURED')
+        cfg = self.address_config.get(board)
+        if ship_to and ship_to['status']=='AVAILABLE' and cfg:
+            # A board without address fields still gets its card; the address
+            # is on the Master PO List row either way.
             account = line['account']
             if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
             fields.update({cfg['address']:ship_to['address'],

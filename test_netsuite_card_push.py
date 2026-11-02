@@ -158,10 +158,11 @@ class AddressImportTests(CatalogTests):
             line=copy.deepcopy(self.line);line['soShipTo'].update(change)
             with self.assertRaises(PushError):self.cards.create('test',line)
         self.assertEqual(self.created,[])
-    def test_mapping_missing_fails_before_create(self):
+    def test_board_without_address_fields_still_gets_card(self):
         self.cards.address_config={}
-        with self.assertRaises(PushError):self.cards.create('test',self.line)
-        self.assertEqual(self.created,[])
+        self.cards.create('test',self.line)
+        self.assertEqual(len(self.created),1)
+        self.assertNotIn('Address',self.created[0])
     def test_payload_checks_every_address_before_writes(self):
         line=copy.deepcopy(self.line);line['soShipTo']['soId']='999'
         with self.assertRaises(PushError):validate_payload({'version':1,'account':LINE['account'],'lines':[line]}, {'test':{}},LINE['account'])

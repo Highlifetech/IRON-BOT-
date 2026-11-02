@@ -402,9 +402,17 @@ class ReviewService:
 
 def register_routes(app, service, authorize):
     from flask import request, jsonify
+    import os
+    line_sync = os.environ.get('OM_CARD_LINE_SYNC', 'off') == 'on'
     def handle(action):
         try:
             payload = authorize(request)
+            if not line_sync:
+                # Cards are starting points the team owns: no line reviews or monitoring.
+                if action == 'tracked': return jsonify(entries=[], hasMore=False)
+                if action == 'missing': return jsonify(status='Line sync off')
+                ids = [l.get('identity') for l in payload.get('lines', []) if isinstance(l, dict)]
+                return jsonify(results=[{'identity': i, 'status': 'Line sync off — edit the card in Lark', 'url': None} for i in ids])
             actor = payload.get('actorId')
             if not isinstance(actor,str) or not actor: raise PushError('ACTOR_REQUIRED')
             if action == 'tracked': return jsonify(service.tracked(payload.get('after','')))

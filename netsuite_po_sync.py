@@ -21,11 +21,15 @@ log = logging.getLogger(__name__)
 PO_QUERY = """
 SELECT t.id, t.tranid, t.entity AS vendorid, BUILTIN.DF(t.entity) AS vendor,
        MIN(so.tranid) AS so_min, MAX(so.tranid) AS so_max,
-       MIN(COALESCE(c.companyname, c.altname)) AS customer
+       MIN(COALESCE(c.companyname, c.altname)) AS customer,
+       MIN(sa.addressee) AS ship_addressee, MIN(sa.attention) AS ship_attention,
+       MIN(sa.addr1) AS ship_addr1, MIN(sa.addr2) AS ship_addr2, MIN(sa.city) AS ship_city,
+       MIN(sa.state) AS ship_state, MIN(sa.zip) AS ship_zip, MIN(sa.country) AS ship_country
 FROM transaction t
 JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F'
 LEFT JOIN transaction so ON so.id = tl.createdfrom
 LEFT JOIN customer c ON c.id = so.entity
+LEFT JOIN transactionShippingAddress sa ON sa.nkey = so.shippingaddress
 WHERE t.type = 'PurchOrd' AND t.createddate >= SYSDATE - {days}
 GROUP BY t.id, t.tranid, t.entity, BUILTIN.DF(t.entity)
 ORDER BY t.id DESC
@@ -39,9 +43,15 @@ def po_to_line(row, account):
     so_min, so_max = s(row.get('so_min')), s(row.get('so_max'))
     # A PO drawn from several SOs has no single SO; leave it blank for review.
     so = so_min if so_min == so_max else ''
+    ship_to = ''
+    if so:
+        city_line = ' '.join(x for x in (s(row.get('ship_city')), s(row.get('ship_state')), s(row.get('ship_zip'))) if x)
+        parts = [s(row.get('ship_addressee')), s(row.get('ship_attention')), s(row.get('ship_addr1')),
+                 s(row.get('ship_addr2')), city_line, s(row.get('ship_country'))]
+        ship_to = '\n'.join(p for p in parts if p)
     return {'account': account, 'poId': s(row.get('id')), 'poNumber': s(row.get('tranid')),
             'vendorId': s(row.get('vendorid')), 'vendor': s(row.get('vendor')),
-            'soNumber': so, 'customer': s(row.get('customer')) if so else ''}
+            'soNumber': so, 'customer': s(row.get('customer')) if so else '', 'shipTo': ship_to}
 
 
 class POSync:
@@ -65,6 +75,12 @@ class POSync:
                 if not existing:
                     self.cards.add_master(line)
                     added.append(line['poNumber'])
+                elif line['shipTo'] and len(existing) == 1:
+                    # Only ever fills a blank Ship To Address; never edits a filled one.
+                    current = existing[0].get('fields', {}).get('Ship To Address')
+                    if not current:
+                        self.cards.client.update_record_fields(c['table'], existing[0]['record_id'],
+                                                               {'Ship To Address': line['shipTo']}, app_token=c['base'])
                 self.known.add(line['poId'])
             except Exception as error:  # one bad PO must not stop the rest
                 errors += 1
