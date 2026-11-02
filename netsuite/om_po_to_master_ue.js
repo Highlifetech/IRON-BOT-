@@ -1,6 +1,8 @@
 /**
  * OM — PO to Master PO List (instant)
- * User event on Purchase Order, afterSubmit (create + edit).
+ * User event on Purchase Order.
+ *   beforeSubmit (create): copy Product Name / Variant / Sizes from the source SO line when blank.
+ *   afterSubmit (create + edit): send the PO to Iron Bot.
  * Sends the PO header + product lines to Iron Bot: Master PO List row + one PO Lines row per item.
  * Header only: no production cards are created. Failures never block saving the PO.
  *
@@ -11,10 +13,46 @@
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  */
-define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/log'],
-  (https, crypto, encode, runtime, search, log) => {
+define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 'N/log'],
+  (https, crypto, encode, runtime, search, record, log) => {
 
     const text = (v) => (v === null || v === undefined) ? '' : String(v).trim();
+
+    const COPY_FIELDS = ['custcol_om_product_name', 'custcol_om_variant', 'custcol_om_sizes'];
+
+    // New PO made from an SO: bring over the SO line's Product Name / Variant / Sizes.
+    // Lines are matched by item (and quantity when possible); values typed on the PO are kept.
+    function beforeSubmit(ctx) {
+      if (ctx.type !== ctx.UserEventType.CREATE) return;
+      try {
+        const po = ctx.newRecord;
+        const soId = po.getValue('createdfrom');
+        if (!soId) return;
+        const so = record.load({ type: record.Type.SALES_ORDER, id: soId });
+        const soLines = [];
+        for (let i = 0; i < so.getLineCount({ sublistId: 'item' }); i++) {
+          const get = (f) => so.getSublistValue({ sublistId: 'item', fieldId: f, line: i });
+          const values = {};
+          COPY_FIELDS.forEach((f) => { values[f] = text(get(f)); });
+          if (!COPY_FIELDS.some((f) => values[f])) continue;
+          soLines.push({ item: String(get('item')), qty: Number(get('quantity')), values, used: false });
+        }
+        if (!soLines.length) return;
+        for (let i = 0; i < po.getLineCount({ sublistId: 'item' }); i++) {
+          const get = (f) => po.getSublistValue({ sublistId: 'item', fieldId: f, line: i });
+          const item = String(get('item')), qty = Number(get('quantity'));
+          const match = soLines.find((l) => !l.used && l.item === item && l.qty === qty)
+            || soLines.find((l) => !l.used && l.item === item);
+          if (!match) continue;
+          match.used = true;
+          COPY_FIELDS.forEach((f) => {
+            if (match.values[f] && !text(get(f))) po.setSublistValue({ sublistId: 'item', fieldId: f, line: i, value: match.values[f] });
+          });
+        }
+      } catch (e) {
+        log.error('Copy SO columns to PO failed', e.message || String(e));
+      }
+    }
 
     function afterSubmit(ctx) {
       if (![ctx.UserEventType.CREATE, ctx.UserEventType.EDIT, ctx.UserEventType.XEDIT, ctx.UserEventType.APPROVE]
@@ -95,5 +133,5 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/log'],
       }
     }
 
-    return { afterSubmit };
+    return { beforeSubmit, afterSubmit };
   });
