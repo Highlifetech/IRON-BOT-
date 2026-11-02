@@ -100,10 +100,46 @@ def validate_payload(payload, boards, account):
         for field in ('product', 'description', 'units', 'poNumber', 'soNumber', 'customer', 'vendor'):
             if not isinstance(line.get(field), str) or len(line[field]) > 20000:
                 raise PushError('INVALID_TEXT')
+        for field in ('productName', 'sizes', 'variant'):  # optional NetSuite line columns
+            if field in line and line[field] is not None and (not isinstance(line[field], str) or len(line[field]) > 20000):
+                raise PushError('INVALID_TEXT')
         validate_so_ship_to(line)
         if not line['product'].strip():
             raise PushError('MISSING_PRODUCT')
     return lines
+
+
+def starting_name_and_description(line):
+    """Card starting values. The team edits them in Lark afterwards; never re-synced.
+
+    The full NetSuite description is pasted as-is into Product Description, and
+    the card title is line 1 of that same description so the two always match."""
+    product = (line.get('product') or '').strip()
+    description = (line.get('description') or '').strip() or product
+    first = next((l.strip() for l in description.splitlines() if l.strip()), '')
+    name = (line.get('productName') or '').strip() or first or product
+    variant = (line.get('variant') or '').strip()
+    if variant and variant.lower() not in name.lower():
+        name = f'{name} – {variant}'
+    return name[:200], description
+
+
+def parse_sizes(text):
+    """'S 40, M 60' / 'S:40; M:60' / one per line -> [('S', 40), ('M', 60)].
+
+    The last whole number in each chunk is the quantity; the rest is the size.
+    Chunks that don't parse are returned separately so nothing is silently lost."""
+    rows, bad = [], []
+    for chunk in re.split(r'[,;\n|]+', text or ''):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = re.fullmatch(r'(.+?)\s*[:=\-x×]?\s*(\d+)', chunk)
+        if not m or not m.group(1).strip(' :=-x×'):
+            bad.append(chunk)
+            continue
+        rows.append((m.group(1).strip(' :=-x×')[:40], int(m.group(2))))
+    return rows, bad
 
 
 class PostgresLedger:
@@ -196,7 +232,11 @@ class LarkCards:
             host = account.lower().replace('_', '-') if re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?', account) else None
             fields = {c['po_id_field']: line['poId'], 'PO': line['poNumber'],
                       'NetSuite Supplier ID': line['vendorId'], 'Sales Order': line['soNumber']}
+            ship_to = line.get('shipTo') or ''
+            if not ship_to and isinstance(line.get('soShipTo'), dict) and line['soShipTo'].get('status') == 'AVAILABLE':
+                ship_to = line['soShipTo'].get('address') or ''
             optional = {'Supplier': line.get('vendor', ''), 'Customer': line.get('customer', '') if line['soNumber'] else '',
+                        'Ship To Address': ship_to,
                         'NetSuite lookup status': 'Matched',
                         'NetSuite lookup message': f"Added by Iron Bot from NetSuite PO {line['poId']} on Send to Lark (catalog sync had not run yet).",
                         'Last NetSuite sync': int(time.time() * 1000)}
@@ -274,9 +314,10 @@ class LarkCards:
         b = self.boards[board]
         master = self.master(board, line, allow_add=True)
         f = b['fields']
-        fields = {f['identity']: line['identity'], f['product']: line['product'],
-                  f['description']: line['description'], f['quantity']: line['quantity'],
-                  f['po_relation']: [master['record_id']], f['units']: line['units']}
+        name, description = starting_name_and_description(line)
+        fields = {f['identity']: line['identity'], f['product']: name,
+                  f['description']: description, f['quantity']: line['quantity'],
+                  f['po_relation']: [master['record_id']], f['units']: (line.get('units') or '').strip() or 'Each'}
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
         if f.get('po_link') and f['po_link'] != f['po_relation']:
             fields[f['po_link']] = [master['record_id']]
@@ -284,9 +325,24 @@ class LarkCards:
         for name, value in (b.get('initial_fields') or {}).items():
             fields.setdefault(name, value)
         ship_to = validate_so_ship_to(line)
-        if ship_to and ship_to['status']=='AVAILABLE':
-            cfg = self.address_config.get(board)
-            if not cfg: raise PushError('ADDRESS_FIELDS_NOT_CONFIGURED')
+        cfg = self.address_config.get(board)
+        # Prefer the Master PO List address (PO ship-to, else SO ship-to, from the PO sync).
+        po_address = ''
+        master_fields = master.get('fields', {}) if isinstance(master, dict) else {}
+        raw = master_fields.get('Ship To Address')
+        if isinstance(raw, list):
+            raw = ''.join(str(v.get('text', '')) for v in raw if isinstance(v, dict))
+        if isinstance(raw, str) and raw.strip() and cfg:
+            po_address = raw.strip()[:10000]
+            account = line['account']
+            if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
+            fields.update({cfg['address']: po_address,
+                           cfg['source']: {'text': line['poNumber'] + ' — Ship To',
+                             'link': f"https://{account.lower().replace('_','-')}.app.netsuite.com/app/accounting/transactions/purchord.nl?id={line['poId']}"},
+                           cfg['copied_at']: int(time.time()*1000)})
+        if not po_address and ship_to and ship_to['status']=='AVAILABLE' and cfg:
+            # A board without address fields still gets its card; the address
+            # is on the Master PO List row either way.
             account = line['account']
             if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
             fields.update({cfg['address']:ship_to['address'],
@@ -298,7 +354,38 @@ class LarkCards:
         result = self.client.create_record(b['table'], fields, app_token=b['base'])
         if not re.fullmatch(r'rec[A-Za-z0-9]+', result.get('record_id', '')):
             raise PushError('CREATE_RESULT_UNCONFIRMED')
+        result['sizes'] = self.add_sizes(board, result['record_id'], line)
         return result
+
+    def add_sizes(self, board, record_id, line):
+        """Starting Variants rows from the NetSuite Sizes column. Editable after.
+        Never fails the card: a problem is reported in the result instead."""
+        rows, bad = parse_sizes(line.get('sizes') or '')
+        if not rows:
+            return 'Sizes not readable: ' + ', '.join(bad) if bad else ''
+        v = (self.review_config.get(board) or {}).get('variants')
+        if not v:
+            return 'Sizes not added — board has no Variants table'
+        base = self.boards[board]['base']
+        color = (line.get('variant') or '').strip()
+        made = 0
+        for size, qty in rows:
+            fields = {v['size']: size, v['quantity']: qty, v['parent']: [record_id]}
+            try:
+                self.client.create_record(v['table'], dict(fields, **({'Color': color} if color else {})), app_token=base)
+            except Exception:
+                try:
+                    self.client.create_record(v['table'], fields, app_token=base)
+                except Exception:
+                    continue
+            made += 1
+        note = f'{made} size rows added'
+        total = sum(q for _, q in rows)
+        if isinstance(line.get('quantity'), (int, float)) and total != line['quantity']:
+            note += f' — sizes total {total}, line qty {line["quantity"]:g}'
+        if bad:
+            note += ' — not readable: ' + ', '.join(bad)
+        return note
 
     def url(self, board, record_id):
         b = self.boards[board]
@@ -334,7 +421,10 @@ def process(line, ledger, cards):
         return {'identity': key, 'status': 'Needs review — prior send unconfirmed', 'url': None}
     result = cards.create(board, line)
     ledger.complete(key, result['record_id'])
-    return {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
+    out = {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
+    if result.get('sizes'):
+        out['sizesStatus'] = result['sizes']
+    return out
 
 
 def validate_status_payload(payload, account):
@@ -347,6 +437,42 @@ def validate_status_payload(payload, account):
     if any(not isinstance(key, str) or not re.fullmatch(pattern, key) for key in keys) or len(set(keys)) != len(keys):
         raise PushError('INVALID_OR_DUPLICATE_IDENTITY')
     return keys
+
+
+def validate_po_header(payload, account):
+    if not isinstance(payload, dict) or payload.get('version') != 1 or payload.get('account') != account:
+        raise PushError('INVALID_ACCOUNT_OR_VERSION')
+    po = payload.get('po')
+    if not isinstance(po, dict):
+        raise PushError('INVALID_PO')
+    for field in ('poId', 'vendorId'):
+        if not isinstance(po.get(field), str) or not re.fullmatch(r'[1-9][0-9]*', po[field]):
+            raise PushError('INVALID_SOURCE_ID')
+    for field in ('poNumber', 'soNumber', 'vendor', 'customer', 'shipTo'):
+        value = po.get(field, '')
+        if value is None:
+            value = ''
+        if not isinstance(value, str) or len(value) > 10000:
+            raise PushError('INVALID_TEXT')
+        po[field] = value.strip()
+    if not po['poNumber']:
+        raise PushError('INVALID_PO')
+    return {'account': account, 'poId': po['poId'], 'poNumber': po['poNumber'], 'vendorId': po['vendorId'],
+            'vendor': po['vendor'], 'soNumber': po['soNumber'],
+            'customer': po['customer'] if po['soNumber'] else '', 'shipTo': po['shipTo']}
+
+
+def upsert_po_header(cards, line):
+    """Add the PO's Master PO List row, or fill a blank Ship To Address on an existing one."""
+    c = cards.catalog
+    existing = cards.search(c['base'], c['table'], c['po_id_field'], line['poId'])
+    if not existing:
+        cards.add_master(line)
+        return {'status': 'Added to Master PO List', 'po': line['poNumber']}
+    if line['shipTo'] and len(existing) == 1 and not existing[0].get('fields', {}).get('Ship To Address'):
+        cards.client.update_record_fields(c['table'], existing[0]['record_id'], {'Ship To Address': line['shipTo']}, app_token=c['base'])
+        return {'status': 'Ship To Address filled', 'po': line['poNumber']}
+    return {'status': 'Already in Master PO List', 'po': line['poNumber']}
 
 
 def card_status(key, prior, cards, boards):
@@ -454,6 +580,26 @@ def register(app):
         except Exception:
             app.logger.error('NetSuite board discovery disabled: setup failed')
             registry = None
+
+    @app.post('/integrations/netsuite/po')
+    def receive_netsuite_po():
+        """Instant Master PO List row when a PO is saved in NetSuite (user event).
+        Header only: never creates production cards, never edits a filled row."""
+        if request.content_length is None or request.content_length > 20000:
+            return jsonify(error='INVALID_REQUEST_SIZE'), 413
+        raw = request.get_data()
+        try:
+            authenticate(raw, request.headers.get('X-OM-Timestamp'), request.headers.get('X-OM-Signature'), os.environ.get('OM_CARD_PUSH_SECRET'), allow_short_key=allow_short_key)
+            payload = json.loads(raw)
+            line = validate_po_header(payload, os.environ.get('NETSUITE_ACCOUNT_ID'))
+        except (PushError, ValueError, TypeError) as error:
+            app.logger.warning('NetSuite PO header rejected: %s', error if isinstance(error, PushError) else 'INVALID_JSON')
+            return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
+        try:
+            return jsonify(upsert_po_header(cards, line))
+        except Exception as error:
+            app.logger.warning('NetSuite PO header unconfirmed: %s', error if isinstance(error, PushError) else type(error).__name__)
+            return jsonify(error='PO_SYNC_UNCONFIRMED'), 503
 
     @app.post('/integrations/netsuite/cards/boards')
     def list_netsuite_card_boards():
