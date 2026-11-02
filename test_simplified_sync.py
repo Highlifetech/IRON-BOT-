@@ -92,3 +92,25 @@ class ProductNameAndSizesTests(unittest.TestCase):
     def test_no_variants_table_still_creates_card(self):
         lark=FakeLark();res=LarkCards(lark,BOARDS,CATALOG).create('test',dict(LINE,sizes='S 1'))
         self.assertEqual(len(lark.cards),1);self.assertIn('no Variants table',res['sizes'])
+
+
+class POAddressRuleTests(unittest.TestCase):
+    BASE={'id':1,'tranid':'PO1','vendorid':5,'vendor':'V','so_min':'SO1','so_max':'SO1','customer':'C',
+          'ship_addressee':'SO Person','ship_addr1':'1 SO St','ship_city':'Socity','ship_state':'CA','ship_zip':'90000','ship_country':'US'}
+    def test_po_address_wins(self):
+        r=dict(self.BASE,po_addressee='Steady Hands',po_attention='Wesley Morales',po_addr1='700 Grand Avenue',po_addr2='UNIT 11',po_city='Hackettstown',po_state='NJ',po_zip="'07840",po_country='US')
+        self.assertEqual(po_to_line(r,'1')['shipTo'],'Steady Hands\nWesley Morales\n700 Grand Avenue\nUNIT 11\nHackettstown NJ 07840\nUS')
+    def test_partial_po_address_falls_back_to_so(self):
+        r=dict(self.BASE,po_addressee='Coffee Talk 7, LLC',po_country='US')
+        self.assertTrue(po_to_line(r,'1')['shipTo'].startswith('SO Person'))
+    def test_no_address_anywhere(self):
+        self.assertEqual(po_to_line({'id':1,'tranid':'PO1','vendorid':5,'so_min':None,'so_max':None},'1')['shipTo'],'')
+
+class CardAddressFromMasterTests(unittest.TestCase):
+    def test_card_uses_master_po_address(self):
+        lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
+        cards.address_config={'test':{'address':'Address','source':'Address source','copied_at':'Copied'}}
+        lark.master.append({'record_id':'recM','fields':{'NetSuite PO ID':'10001','PO':'PO-EXAMPLE-1','NetSuite Supplier ID':'126','Sales Order':'SO-EXAMPLE-1','Customer':'Customer','Ship To Address':'PO ship-to\nCity'}})
+        cards.create('test',LINE)
+        self.assertEqual(lark.cards[0]['Address'],'PO ship-to\nCity')
+        self.assertIn('PO-EXAMPLE-1',lark.cards[0]['Address source']['text'])

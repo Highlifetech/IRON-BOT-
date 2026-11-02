@@ -326,7 +326,21 @@ class LarkCards:
             fields.setdefault(name, value)
         ship_to = validate_so_ship_to(line)
         cfg = self.address_config.get(board)
-        if ship_to and ship_to['status']=='AVAILABLE' and cfg:
+        # Prefer the Master PO List address (PO ship-to, else SO ship-to, from the PO sync).
+        po_address = ''
+        master_fields = master.get('fields', {}) if isinstance(master, dict) else {}
+        raw = master_fields.get('Ship To Address')
+        if isinstance(raw, list):
+            raw = ''.join(str(v.get('text', '')) for v in raw if isinstance(v, dict))
+        if isinstance(raw, str) and raw.strip() and cfg:
+            po_address = raw.strip()[:10000]
+            account = line['account']
+            if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
+            fields.update({cfg['address']: po_address,
+                           cfg['source']: {'text': line['poNumber'] + ' — Ship To',
+                             'link': f"https://{account.lower().replace('_','-')}.app.netsuite.com/app/accounting/transactions/purchord.nl?id={line['poId']}"},
+                           cfg['copied_at']: int(time.time()*1000)})
+        if not po_address and ship_to and ship_to['status']=='AVAILABLE' and cfg:
             # A board without address fields still gets its card; the address
             # is on the Master PO List row either way.
             account = line['account']

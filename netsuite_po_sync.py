@@ -24,8 +24,12 @@ SELECT t.id, t.tranid, t.entity AS vendorid, BUILTIN.DF(t.entity) AS vendor,
        MIN(COALESCE(c.companyname, c.altname)) AS customer,
        MIN(sa.addressee) AS ship_addressee, MIN(sa.attention) AS ship_attention,
        MIN(sa.addr1) AS ship_addr1, MIN(sa.addr2) AS ship_addr2, MIN(sa.city) AS ship_city,
-       MIN(sa.state) AS ship_state, MIN(sa.zip) AS ship_zip, MIN(sa.country) AS ship_country
+       MIN(sa.state) AS ship_state, MIN(sa.zip) AS ship_zip, MIN(sa.country) AS ship_country,
+       MIN(pa.addressee) AS po_addressee, MIN(pa.attention) AS po_attention,
+       MIN(pa.addr1) AS po_addr1, MIN(pa.addr2) AS po_addr2, MIN(pa.city) AS po_city,
+       MIN(pa.state) AS po_state, MIN(pa.zip) AS po_zip, MIN(pa.country) AS po_country
 FROM transaction t
+LEFT JOIN transactionShippingAddress pa ON pa.nkey = t.shippingaddress
 JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F'
 LEFT JOIN transaction so ON so.id = tl.createdfrom
 LEFT JOIN customer c ON c.id = so.entity
@@ -43,12 +47,18 @@ def po_to_line(row, account):
     so_min, so_max = s(row.get('so_min')), s(row.get('so_max'))
     # A PO drawn from several SOs has no single SO; leave it blank for review.
     so = so_min if so_min == so_max else ''
-    ship_to = ''
-    if so:
-        city_line = ' '.join(x for x in (s(row.get('ship_city')), s(row.get('ship_state')), s(row.get('ship_zip'))) if x)
-        parts = [s(row.get('ship_addressee')), s(row.get('ship_attention')), s(row.get('ship_addr1')),
-                 s(row.get('ship_addr2')), city_line, s(row.get('ship_country'))]
-        ship_to = '\n'.join(p for p in parts if p)
+    def address(prefix):
+        # Only a complete address counts (street + city); NetSuite sometimes
+        # keeps just a name and country on a PO.
+        if not (s(row.get(prefix + '_addr1')) and s(row.get(prefix + '_city'))):
+            return ''
+        zip_code = s(row.get(prefix + '_zip')).lstrip("'")
+        city_line = ' '.join(x for x in (s(row.get(prefix + '_city')), s(row.get(prefix + '_state')), zip_code) if x)
+        parts = [s(row.get(prefix + '_addressee')), s(row.get(prefix + '_attention')), s(row.get(prefix + '_addr1')),
+                 s(row.get(prefix + '_addr2')), city_line, s(row.get(prefix + '_country'))]
+        return '\n'.join(p for p in parts if p)
+    # PO ship-to first (where the factory ships), then the SO ship-to.
+    ship_to = address('po') or (address('ship') if so else '')
     return {'account': account, 'poId': s(row.get('id')), 'poNumber': s(row.get('tranid')),
             'vendorId': s(row.get('vendorid')), 'vendor': s(row.get('vendor')),
             'soNumber': so, 'customer': s(row.get('customer')) if so else '', 'shipTo': ship_to}
