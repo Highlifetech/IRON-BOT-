@@ -63,6 +63,13 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn({'key': 'tblNew', 'label': 'Acme', 'discovered': True}, reg.listing())
         self.assertEqual(boards['tblNew']['initial_fields'], {'Status': 'Pending Artwork'})
 
+    def test_dropdown_follows_lark_sidebar_order(self):
+        schemas = {'tblZed': board_fields('tblZed', 'Zed'), 'tblAcme': board_fields('tblAcme', 'Acme'),
+                   VARIANTS: variant_schema(('tblWoof', 'Woof'), ('tblZed', 'Zed'), ('tblAcme', 'Acme'))}
+        reg, *_ = self.make([('tblZed', 'Zed'), ('tblWoof', 'Woof'), ('tblAcme', 'Acme')], schemas)
+        reg.refresh(force=True)
+        self.assertEqual([r['label'] for r in reg.listing()], ['Zed', 'Woof', 'Acme'])
+
     def test_copies_backups_quotes_and_tests_are_ignored(self):
         names = ['Acme Copy', 'Acme — BACKUP old cards 10-20', 'Workshop Quotes', 'TEST — PO order cards', 'Acme — PRE-TEMPLATE']
         tables = [('tbl%d' % i, n) for i, n in enumerate(names)]
