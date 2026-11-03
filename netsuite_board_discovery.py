@@ -183,6 +183,8 @@ class BoardRegistry:
         base, catalog_table = self.catalog['base'], self.catalog['table']
         variants_table = self.variants_table()
         tables = _paged(self.client, f'/open-apis/bitable/v1/apps/{base}/tables')
+        # Remember Lark's sidebar order so the NetSuite dropdown lists boards the same way.
+        self.table_order = {t.get('table_id'): i for i, t in enumerate(tables) if t.get('table_id')}
         configured = {b['table'] for b in self.boards.values()}
         variant_fields = {f['field_name']: f for f in
                           _paged(self.client, f'/open-apis/bitable/v1/apps/{base}/tables/{variants_table}/fields')}
@@ -244,4 +246,10 @@ class BoardRegistry:
             if key not in self.review_config or self.exclude.search(board.get('label') or key):
                 continue
             rows.append({'key': key, 'label': board.get('label') or key, 'discovered': bool(board.get('discovered'))})
-        return sorted(rows, key=lambda r: (r['discovered'], r['label'].casefold()))
+        order = getattr(self, 'table_order', None) or {}
+        last = len(order)
+        def position(r):
+            table = (self.boards.get(r['key']) or {}).get('table') or r['key']
+            return (order.get(table, last), r['label'].casefold())
+        # Same order as the tables in the Lark base sidebar; unknown tables go last, A-Z.
+        return sorted(rows, key=position)
