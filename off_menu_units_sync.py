@@ -40,6 +40,7 @@ EXCLUDE = re.compile(os.environ.get(
 NUMBER, LINK, DUPLEX, ATTACHMENT = 2, 18, 21, 17
 QTY_FIELD = 'Off Menu Qty'  # same name on the boards and on the master list
 KEY_FIELD = 'Source Card ID'
+RATE_LIMITED = 1254290
 TEAM_FIELDS = ('Status', 'Tracking #', 'Date Shipped', 'Notes')
 REMOVED_NOTE = 'No longer requested on the order card — check before shipping.'
 
@@ -113,7 +114,11 @@ class UnitsSync:
 
     # -- Lark access
     def _api(self, method, path, **kw):
-        response = getattr(self.client, '_' + method)(f'/open-apis/bitable/v1/apps/{self.base}{path}', **kw)
+        for attempt in range(4):  # Lark rate limit: back off and retry
+            response = getattr(self.client, '_' + method)(f'/open-apis/bitable/v1/apps/{self.base}{path}', **kw)
+            if response.get('code') != RATE_LIMITED:
+                break
+            time.sleep(2 * (attempt + 1))
         if response.get('code') != 0:
             raise RuntimeError(f"Lark {method} {path} failed: {response.get('code')} {response.get('msg')}")
         return response.get('data') or {}
@@ -157,7 +162,13 @@ class UnitsSync:
         """Cards on one board that ask for Off Menu units, as master-row fields keyed by Source Card ID."""
         body = {'filter': {'conjunction': 'and', 'conditions': [
             {'field_name': QTY_FIELD, 'operator': 'isGreater', 'value': ['0']}]}}
-        rows = self._paged(f"/tables/{board['table']}/records/search", body=body)
+        try:
+            rows = self._paged(f"/tables/{board['table']}/records/search", body=body)
+        except RuntimeError as e:
+            if 'InvalidFilter' not in str(e):
+                raise
+            # some boards reject the server-side filter; read all cards and filter here
+            rows = self._paged(f"/tables/{board['table']}/records/search", body={})
         out = {}
         for row in rows:
             f = row.get('fields') or {}

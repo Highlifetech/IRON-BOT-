@@ -166,5 +166,35 @@ class UnitsSyncTest(unittest.TestCase):
         self.assertEqual((lark.master['recM']['Status'], lark.master['recM']['Tracking #']), ('Received', 'typed'))
 
 
+    def test_invalid_filter_falls_back_to_unfiltered_read(self):
+        class PickyLark(FakeLark):
+            def _post(self, path, body=None, params=None):
+                if path.endswith('/records/search') and body.get('filter'):
+                    return {'code': 1254018, 'msg': 'InvalidFilter'}
+                if path.endswith('/records/search'):
+                    return self._ok({'items': [{'record_id': k, 'fields': v} for k, v in self.cards.items()]})
+                return super()._post(path, body, params)
+        lark = PickyLark({'recA': card(), 'recB': card(**{'Off Menu Qty': None})})
+        stats = sync(lark).run_once()
+        self.assertEqual((stats['created'], stats['errors']), (1, 0))
+
+    def test_rate_limit_is_retried(self):
+        import off_menu_units_sync as mod
+        class BusyLark(FakeLark):
+            busy = 1
+            def _get(self, path, params=None):
+                if path.endswith('tblMaster/records') and self.busy:
+                    self.busy -= 1
+                    return {'code': 1254290, 'msg': 'TooManyRequest'}
+                return super()._get(path, params)
+        lark = BusyLark({'recA': card()})
+        sleep, mod.time.sleep = mod.time.sleep, lambda s: None
+        try:
+            stats = sync(lark).run_once()
+        finally:
+            mod.time.sleep = sleep
+        self.assertEqual(stats['created'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
