@@ -571,6 +571,16 @@ def card_status(key, prior, cards, boards):
     return {'identity': key, 'status': 'Needs review — previous send unconfirmed' if prior else 'No linked card', 'url': None}
 
 
+def _reconcile(client, catalog, boards, review_config=None, address_config=None):
+    """Point configured boards at fields that still exist in Lark. Never blocks startup."""
+    try:
+        from netsuite_board_discovery import reconcile_configured_boards
+        reconcile_configured_boards(client, catalog, boards, review_config, address_config)
+    except Exception as error:
+        import logging
+        logging.getLogger(__name__).warning('Board reconcile skipped: %s', type(error).__name__)
+
+
 def register(app):
     if os.environ.get('OM_CARD_PUSH_ENABLED') != 'true':
         return
@@ -597,6 +607,7 @@ def register(app):
             raise PushError('INVALID_CONFIGURATION')
         # Instantiate bot credentials directly; never a client patched to act as a user.
         cards = LarkCards(LarkClient(), boards, catalog)
+        _reconcile(cards.client, catalog, boards)
         ledger = PostgresLedger(os.environ['DATABASE_URL'])
         ledger.initialize()
     except Exception:
@@ -610,6 +621,7 @@ def register(app):
         try:
             config = json.loads(os.environ['OM_CARD_REVIEW_CONFIG'])
             if set(config) != set(boards): raise PushError('INVALID_REVIEW_CONFIGURATION')
+            _reconcile(cards.client, catalog, boards, review_config=config)
             review = ReviewService(cards, ledger, config)
             for board in boards: review.cfg(board)
             review.validate_schema()
@@ -626,6 +638,7 @@ def register(app):
             if os.environ.get('OM_CARD_ADDRESS_CONFIG'):
                 from address_receiver import AddressService, register_address_routes
                 address_config=json.loads(os.environ['OM_CARD_ADDRESS_CONFIG'])
+                if isinstance(address_config,dict): _reconcile(cards.client,catalog,boards,review_config=config,address_config=address_config)
                 if not isinstance(address_config,dict) or not address_config or not set(address_config).issubset(boards):
                     raise PushError('INVALID_ADDRESS_CONFIGURATION')
                 address_service=AddressService(review,address_config)
