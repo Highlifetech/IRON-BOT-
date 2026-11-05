@@ -57,6 +57,11 @@ def text(value):
                 parts.append(str(v))
         return ''.join(parts).strip()
     if isinstance(value, dict):
+        # The records/search API wraps formula and lookup values: {"type": 1, "value": [...]}.
+        if 'value' in value:
+            return text(value['value'])
+        if value.get('link_record_ids') is not None:
+            return ''
         return str(value.get('text') or value.get('link') or '').strip()
     return '' if value is None else str(value).strip()
 
@@ -70,6 +75,10 @@ def qty(value):
 
 
 def record_ids(value):
+    if isinstance(value, dict):  # records/search API: {"link_record_ids": [...]} or wrapped {"value": [...]}
+        value = value.get('link_record_ids') or value.get('value') or []
+        if value and all(isinstance(v, str) for v in value):
+            return [i for i in value if i.startswith('rec')]
     ids = []
     for entry in value or []:
         if isinstance(entry, str):
@@ -80,14 +89,19 @@ def record_ids(value):
 
 
 def attachments(value):
+    if isinstance(value, dict):
+        value = value.get('value') or []
     return [{'file_token': a['file_token']} for a in value or []
             if isinstance(a, dict) and a.get('file_token')]
 
 
 def first(fields, names):
     for name in names:
-        if fields.get(name) not in (None, '', []):
-            return fields.get(name)
+        value = fields.get(name)
+        if value in (None, '', []):
+            continue
+        if text(value) or record_ids(value) or attachments(value):
+            return value
     return None
 
 
