@@ -4,8 +4,7 @@ import unittest
 from off_menu_units_sync import UnitsSync, REMOVED_NOTE
 
 BOARD_FIELDS = [
-    {'field_name': 'Units for Off Menu', 'type': 7},
-    {'field_name': 'Warehouse Qty', 'type': 2},
+    {'field_name': 'Off Menu Qty', 'type': 2},
     {'field_name': 'Shipments', 'type': 21, 'property': {'table_id': 'tblShip'}},
 ]
 
@@ -35,7 +34,7 @@ class FakeLark:
         self.calls.append(('post', path, body))
         if path.endswith('/records/search'):
             rows = [{'record_id': k, 'fields': v} for k, v in self.cards.items()
-                    if (v.get('Warehouse Qty') or 0) > 0]
+                    if (v.get('Off Menu Qty') or 0) > 0]
             return self._ok({'items': rows})
         if path.endswith('/records/batch_get'):
             return self._ok({'records': [{'record_id': i, 'fields': self.shipments[i]}
@@ -59,7 +58,7 @@ class FakeLark:
 
 
 def card(**kw):
-    f = {'Units for Off Menu': True, 'Warehouse Qty': 5, 'Product Name': 'FFD Maroon Hat',
+    f = {'Off Menu Qty': 5, 'Product Name': 'FFD Maroon Hat',
          'PO Number': [{'text': 'PO6990', 'type': 'text'}], 'Customer-': [{'text': 'Carson Dyer', 'type': 'text'}],
          'PO': [{'record_ids': ['recPO1'], 'table_id': 'tblMasterPO'}],
          'Approved Production Artwork': [{'file_token': 'tok1', 'name': 'a.jpg'}]}
@@ -82,7 +81,7 @@ class UnitsSyncTest(unittest.TestCase):
         self.assertEqual(row['Status'], 'Requested')
         self.assertEqual(row['PO Number'], 'PO6990')
         self.assertEqual(row['PO'], ['recPO1'])
-        self.assertEqual(row['Warehouse Qty'], 5)
+        self.assertEqual(row['Off Menu Qty'], 5)
         self.assertEqual(row['Photo'], [{'file_token': 'tok1'}])
         self.assertIn('Monterey Bay', row['Ship To'])
 
@@ -99,16 +98,16 @@ class UnitsSyncTest(unittest.TestCase):
         self.assertFalse([c for c in lark.calls if c[0] in ('put', 'delete')])
 
     def test_unticked_box_or_zero_qty_is_not_requested(self):
-        lark = FakeLark({'recA': card(**{'Units for Off Menu': False}), 'recB': card(**{'Warehouse Qty': 0})})
+        lark = FakeLark({'recA': card(**{'Off Menu Qty': None}), 'recB': card(**{'Off Menu Qty': 0})})
         self.assertEqual(sync(lark).run_once()['created'], 0)
 
     def test_quantity_change_updates_but_keeps_team_fields(self):
-        master = {'recM': {'Source Card ID': 'tblBoard:recA', 'Warehouse Qty': 5, 'Status': 'Packed',
+        master = {'recM': {'Source Card ID': 'tblBoard:recA', 'Off Menu Qty': 5, 'Status': 'Packed',
                            'Tracking #': 'X1', 'Notes': 'fragile'}}
-        lark = FakeLark({'recA': card(**{'Warehouse Qty': 8})}, master)
+        lark = FakeLark({'recA': card(**{'Off Menu Qty': 8})}, master)
         sync(lark).run_once()
         row = lark.master['recM']
-        self.assertEqual(row['Warehouse Qty'], 8)
+        self.assertEqual(row['Off Menu Qty'], 8)
         self.assertEqual((row['Status'], row['Tracking #'], row['Notes']), ('Packed', 'X1', 'fragile'))
 
     def test_duplicates_are_collapsed(self):
@@ -165,6 +164,36 @@ class UnitsSyncTest(unittest.TestCase):
         lark = FakeLark({'recA': c}, master, shipments)
         sync(lark).run_once()
         self.assertEqual((lark.master['recM']['Status'], lark.master['recM']['Tracking #']), ('Received', 'typed'))
+
+
+    def test_invalid_filter_falls_back_to_unfiltered_read(self):
+        class PickyLark(FakeLark):
+            def _post(self, path, body=None, params=None):
+                if path.endswith('/records/search') and body.get('filter'):
+                    return {'code': 1254018, 'msg': 'InvalidFilter'}
+                if path.endswith('/records/search'):
+                    return self._ok({'items': [{'record_id': k, 'fields': v} for k, v in self.cards.items()]})
+                return super()._post(path, body, params)
+        lark = PickyLark({'recA': card(), 'recB': card(**{'Off Menu Qty': None})})
+        stats = sync(lark).run_once()
+        self.assertEqual((stats['created'], stats['errors']), (1, 0))
+
+    def test_rate_limit_is_retried(self):
+        import off_menu_units_sync as mod
+        class BusyLark(FakeLark):
+            busy = 1
+            def _get(self, path, params=None):
+                if path.endswith('tblMaster/records') and self.busy:
+                    self.busy -= 1
+                    return {'code': 1254290, 'msg': 'TooManyRequest'}
+                return super()._get(path, params)
+        lark = BusyLark({'recA': card()})
+        sleep, mod.time.sleep = mod.time.sleep, lambda s: None
+        try:
+            stats = sync(lark).run_once()
+        finally:
+            mod.time.sleep = sleep
+        self.assertEqual(stats['created'], 1)
 
 
 if __name__ == '__main__':
