@@ -3363,6 +3363,10 @@ def _start_background_tasks():
 from netsuite_card_push import register as register_netsuite_card_push
 register_netsuite_card_push(app)
 
+# Off Menu warehouse units: one master-list row per card that asks for units.
+from off_menu_units_sync import register as register_off_menu_units_sync
+register_off_menu_units_sync(app)
+
 
 if __name__ == "__main__":
     _start_background_tasks()
