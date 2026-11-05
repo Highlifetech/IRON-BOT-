@@ -32,7 +32,8 @@ BOARD_FIELDS = {
     'identity': (('NetSuite product line ID',), (TEXT,)),
     'product': (('Product Name', 'Products'), (TEXT,)),
     'description': (('Product Description',), (TEXT,)),
-    'quantity': (('Ordered Quantity (NetSuite)', 'Ordered Quantity', 'Ordered Quantity — New'), (TEXT, NUMBER)),
+    # The visible "Ordered Quantity" wins; the others are older hidden copies.
+    'quantity': (('Ordered Quantity', 'Ordered Quantity (NetSuite)', 'Ordered Quantity — New'), (TEXT, NUMBER)),
     'units': (('Unit',), (TEXT,)),
 }
 REVIEW_FIELDS = {
@@ -245,3 +246,77 @@ class BoardRegistry:
                 continue
             rows.append({'key': key, 'label': board.get('label') or key, 'discovered': bool(board.get('discovered'))})
         return sorted(rows, key=lambda r: (r['discovered'], r['label'].casefold()))
+
+
+def reconcile_configured_boards(client, catalog, boards, review_config=None, address_config=None):
+    """Re-point hand-configured boards (OM_CARD_PUSH_BOARDS / OM_CARD_REVIEW_CONFIG /
+    OM_CARD_ADDRESS_CONFIG) at the fields that exist in Lark right now.
+
+    Boards are cleaned up in Lark over time (duplicate "— New" fields and hidden
+    copies removed). A configured name that no longer exists would make every push
+    to that board fail, so each board is re-read from its live schema with the same
+    rules as discovery. Quantity always follows the visible "Ordered Quantity".
+    Per board and per section: a board whose schema cannot be read, or that no
+    longer qualifies, keeps its configuration unchanged. Returns {board: [changes]}.
+    """
+    review_config = review_config if review_config is not None else {}
+    address_config = address_config if address_config is not None else {}
+    base, catalog_table = catalog.get('base'), catalog.get('table')
+    tables = {c.get('variants', {}).get('table') for c in review_config.values() if isinstance(c, dict)}
+    tables.discard(None)
+    variants_table = os.environ.get('OM_CARD_DISCOVERY_VARIANTS_TABLE') or (tables.pop() if len(tables) == 1 else None)
+    try:
+        variant_fields = ({f['field_name']: f for f in _paged(
+            client, f'/open-apis/bitable/v1/apps/{base}/tables/{variants_table}/fields')} if variants_table else {})
+    except Exception as error:
+        log.warning('Board reconcile: variants table unreadable: %s', error)
+        variant_fields = {}
+    changes = {}
+    for key, board in list(boards.items()):
+        if not isinstance(board, dict) or board.get('base') != base or not board.get('table'):
+            continue
+        try:
+            fields = {f['field_name']: f for f in _paged(
+                client, f"/open-apis/bitable/v1/apps/{base}/tables/{board['table']}/fields")}
+        except Exception as error:
+            log.warning('Board reconcile: %s unreadable: %s', key, error)
+            continue
+        done = []
+        live = board.setdefault('fields', {})
+        for name, (names, types) in BOARD_FIELDS.items():
+            try:
+                pick = _pick(fields, names, types)
+            except DiscoveryError:
+                continue
+            if live.get(name) != pick:
+                done.append(f'{name}: {live.get(name)} -> {pick}')
+                live[name] = pick
+        rc = review_config.get(key)
+        if isinstance(rc, dict) and variant_fields:
+            try:
+                _, review, _ = board_from_schema(base, board['table'], board.get('label') or key, fields,
+                                                 catalog_table, variants_table, variant_fields)
+                for name in list(REVIEW_FIELDS) + ['variants_relation']:
+                    if rc.get(name) != review.get(name):
+                        done.append(f'{name}: {rc.get(name)} -> {review.get(name)}')
+                        rc[name] = review[name]
+                parent = review['variants']['parent']
+                if isinstance(rc.get('variants'), dict) and rc['variants'].get('parent') != parent:
+                    done.append(f"variants.parent: {rc['variants'].get('parent')} -> {parent}")
+                    rc['variants']['parent'] = parent
+            except DiscoveryError as error:
+                log.warning('Board reconcile: review fields for %s kept (%s)', key, error)
+        ac = address_config.get(key)
+        if isinstance(ac, dict):
+            for name, (names, types) in ADDRESS_FIELDS.items():
+                try:
+                    pick = _pick(fields, names, types)
+                except DiscoveryError:
+                    continue
+                if ac.get(name) != pick:
+                    done.append(f'address.{name}: {ac.get(name)} -> {pick}')
+                    ac[name] = pick
+        if done:
+            changes[key] = done
+            log.info('Board reconcile %s: %s', board.get('label') or key, '; '.join(done))
+    return changes
