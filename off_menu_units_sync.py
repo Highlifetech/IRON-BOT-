@@ -1,19 +1,18 @@
-"""Keep the "Off Menu Warehouse Extras" master list in step with every board.
+"""Keep the "Off Menu Extras" master list in step with every board.
 
-Any production or Programs board card that has "Units for Off Menu" ticked and
-a "Warehouse Qty" above zero gets exactly one row in the master list, keyed by
-"Source Card ID" (<board table id>:<card record id>). Re-ticking the box never
-creates a duplicate, and changes on the card (quantity, product, PO, artwork)
-flow into the row.
+Any production or Programs board card with an "Off Menu Qty" above zero gets
+exactly one row in the master list, keyed by "Source Card ID" (<board table
+id>:<card record id>). Editing the quantity never creates a duplicate, and
+changes on the card (quantity, product, PO, artwork) flow into the row.
 
 Fields the team owns on the master row (Status, Tracking #, Date Shipped,
-Notes) are never overwritten. When a card stops asking for units, its row is
+Notes) are never overwritten. When a card's Off Menu Qty goes back to
+0 or blank, its row is
 removed only if nothing has happened yet (Status still "Requested");
 otherwise it is kept and flagged in Notes.
 
-Boards are discovered by schema: any table that has a checkbox "Units for Off
-Menu" and a number "Warehouse Qty" and is not a copy/backup/template/test/quote
-table. A board that cannot be read in a cycle is skipped for that cycle and its
+Boards are discovered by schema: any table that has a number "Off Menu Qty" and
+is not a copy/backup/template/test/quote table. A board that cannot be read in a cycle is skipped for that cycle and its
 rows are left untouched.
 
 Opt out with OM_UNITS_SYNC_ENABLED=false.
@@ -38,8 +37,8 @@ EXCLUDE = re.compile(os.environ.get(
     r'(?i)(\bcopy\b|backup|template|\btest\b|quote|archive|\bold\b|draft|prototype|'
     r'new product cards|rebuild review|urgent|^master\b)'))
 
-CHECKBOX, NUMBER, LINK, DUPLEX, ATTACHMENT = 7, 2, 18, 21, 17
-FLAG_FIELD, QTY_FIELD = 'Units for Off Menu', 'Warehouse Qty'
+NUMBER, LINK, DUPLEX, ATTACHMENT = 2, 18, 21, 17
+QTY_FIELD = 'Off Menu Qty'  # same name on the boards and on the master list
 KEY_FIELD = 'Source Card ID'
 TEAM_FIELDS = ('Status', 'Tracking #', 'Date Shipped', 'Notes')
 REMOVED_NOTE = 'No longer requested on the order card — check before shipping.'
@@ -147,8 +146,7 @@ class UnitsSync:
             except Exception as e:
                 log.warning('UNITS_SYNC: cannot read fields of %s: %s', name, e)
                 continue
-            if fields.get(FLAG_FIELD, {}).get('type') == CHECKBOX and \
-                    fields.get(QTY_FIELD, {}).get('type') == NUMBER:
+            if fields.get(QTY_FIELD, {}).get('type') == NUMBER:
                 found.append({'table': tid, 'name': name, 'fields': fields})
         self._boards, self._boards_at = found, time.time()
         log.info('UNITS_SYNC: %d boards carry Off Menu units fields', len(found))
@@ -163,7 +161,7 @@ class UnitsSync:
         out = {}
         for row in rows:
             f = row.get('fields') or {}
-            if f.get(FLAG_FIELD) is not True or qty(f.get(QTY_FIELD)) <= 0:
+            if qty(f.get(QTY_FIELD)) <= 0:
                 continue
             out[f"{board['table']}:{row['record_id']}"] = self.row_fields(board, row['record_id'], f)
         return out
@@ -179,7 +177,7 @@ class UnitsSync:
             'PO Number': po_number,
             'Customer': text(first(f, ('Customer-', 'Customer'))),
             'Vendor': text(first(f, ('Vendor', 'Production Vendor', 'Supplier'))),
-            'Warehouse Qty': qty(f.get(QTY_FIELD)),
+            QTY_FIELD: qty(f.get(QTY_FIELD)),
             'Source Board': board['name'],
             'Ship To': SHIP_TO,
             'Order Card': {'link': f"{LARK_WEB}/base/{self.base}?table={board['table']}&record={record_id}",
@@ -252,7 +250,7 @@ class UnitsSync:
             return record_ids(current) == wanted
         if field == 'Order Card':
             return isinstance(current, dict) and current.get('link') == wanted['link']
-        if field == 'Warehouse Qty':
+        if field == QTY_FIELD:
             return qty(current) == wanted
         return text(current) == wanted
 
