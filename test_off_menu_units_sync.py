@@ -146,6 +146,18 @@ class UnitsSyncTest(unittest.TestCase):
         self.assertEqual(row['Tracking #'], '1Z999')  # the client box is not ours
         self.assertEqual(row['Date Shipped'], 1793900000000)
 
+    def test_search_api_shapes_for_formulas_lookups_and_links(self):
+        # records/search wraps formula/lookup values and returns links as link_record_ids.
+        c = card(**{'PO Number': {'type': 1, 'value': [{'text': 'PO6936', 'type': 'text'}]},
+                    'Customer-': {'type': 1, 'value': [{'text': "Mike's Hot Honey", 'type': 'text'}]},
+                    'Vendor': {'type': 1, 'value': []},
+                    'Production Vendor': {'link_record_ids': ['recV']},
+                    'PO': {'link_record_ids': ['recPO9']}})
+        lark = FakeLark({'recA': c})
+        sync(lark).run_once()
+        row = list(lark.master.values())[0]
+        self.assertEqual((row['PO Number'], row['Customer'], row['PO']), ('PO6936', "Mike's Hot Honey", ['recPO9']))
+
     def test_received_status_is_never_downgraded(self):
         shipments = {'recS1': {'Destination': 'Off Menu / Universal (overage)', 'Tracking Number': '1Z999'}}
         c = card(Shipments=[{'record_ids': ['recS1'], 'table_id': 'tblShip'}])
