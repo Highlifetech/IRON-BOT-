@@ -2,7 +2,7 @@
  * OM — PO to Master PO List (instant)
  * User event on Purchase Order.
  *   beforeSubmit (create): copy Product Name / Variant / Sizes from the source SO line when blank.
- *   afterSubmit (create + edit): send the PO to Iron Bot.
+ *   afterSubmit (create + edit): send the PO to Iron Bot, with its live billing / payment status.
  * Sends the PO header + product lines to Iron Bot: Master PO List row + one PO Lines row per item.
  * Header only: no production cards are created. Failures never block saving the PO.
  *
@@ -13,8 +13,8 @@
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  */
-define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 'N/log'],
-  (https, crypto, encode, runtime, search, record, log) => {
+define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 'N/log', './om_po_status_lib'],
+  (https, crypto, encode, runtime, search, record, log, statusLib) => {
 
     const text = (v) => (v === null || v === undefined) ? '' : String(v).trim();
 
@@ -108,7 +108,9 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 
             vendor: text(po.getText('entity')),
             soNumber, customer, shipTo
           },
-          lines
+          lines,
+          // Live billing / payment status and totals (Master PO List).
+          status: (() => { try { const st = statusLib.status(poId); if (st) delete st.poId; return st; } catch (e) { return null; } })()
         });
 
         const script = runtime.getCurrentScript();

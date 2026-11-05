@@ -11,6 +11,7 @@ uses a separate restricted signing secret, never a URL/client-side credential.
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -19,6 +20,8 @@ import time
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import urlencode
+
+log = logging.getLogger(__name__)
 
 
 class PushError(Exception):
@@ -499,9 +502,14 @@ def validate_po_header(payload, account):
         q = l.get('quantity')
         clean['quantity'] = q if isinstance(q, (int, float)) and not isinstance(q, bool) else None
         lines.append(clean)
+    status = None
+    if payload.get('status') is not None:
+        from netsuite_po_status import validate_status
+        status = validate_status(dict(payload['status'], poId=po['poId']))
     return {'account': account, 'poId': po['poId'], 'poNumber': po['poNumber'], 'vendorId': po['vendorId'],
             'vendor': po['vendor'], 'soNumber': po['soNumber'],
-            'customer': po['customer'] if po['soNumber'] else '', 'shipTo': po['shipTo'], 'lines': lines}
+            'customer': po['customer'] if po['soNumber'] else '', 'shipTo': po['shipTo'], 'lines': lines,
+            'status': status}
 
 
 PO_LINES_TABLE = os.environ.get('OM_PO_LINES_TABLE', 'tbl9dLxLGfKJemQy')
@@ -529,7 +537,17 @@ def upsert_po_lines(cards, line, master_id):
             fields['Quantity'] = l['quantity']
         rows = cards.search(base, PO_LINES_TABLE, 'NetSuite line ID', key)
         if rows:
+            old_fields = dict(rows[0].get('fields', {}))
             cards.client.update_record_fields(PO_LINES_TABLE, rows[0]['record_id'], fields, app_token=base)
+            # Quantity or sizes changed in NetSuite: carry it to the production card.
+            from netsuite_po_status import line_changed, update_card_quantity
+            if line_changed(old_fields, l):
+                try:
+                    from netsuite_card_fill import FILL_SINCE_MS
+                    update_card_quantity(cards, key, l, FILL_SINCE_MS)
+                except Exception as error:
+                    log.warning('Card quantity update failed for %s: %s', key,
+                                error if isinstance(error, PushError) else type(error).__name__)
         else:
             cards.client.create_record(PO_LINES_TABLE, fields, app_token=base)
         done += 1
@@ -550,6 +568,16 @@ def upsert_po_header(cards, line):
             cards.client.update_record_fields(c['table'], existing[0]['record_id'], {'Ship To Address': line['shipTo']}, app_token=c['base'])
             status = 'Ship To Address filled'
     lines = upsert_po_lines(cards, line, master['record_id'])
+    # Header values NetSuite owns: total quantity and live status.
+    extra = {}
+    qtys = [l['quantity'] for l in line.get('lines') or [] if l.get('quantity') is not None]
+    if qtys:
+        extra['Quantity'] = sum(qtys)
+    if line.get('status'):
+        from netsuite_po_status import status_fields
+        extra.update(status_fields(line['status']))
+    if extra:
+        cards.client.update_record_fields(c['table'], master['record_id'], extra, app_token=c['base'])
     return {'status': status, 'po': line['poNumber'], 'lines': lines}
 
 
@@ -687,6 +715,14 @@ def register(app):
         except Exception as error:
             app.logger.warning('NetSuite PO header unconfirmed: %s', error if isinstance(error, PushError) else type(error).__name__)
             return jsonify(error='PO_SYNC_UNCONFIRMED'), 503
+
+    # Live PO status (billed, paid, received) from NetSuite bills / payments / receipts.
+    try:
+        from netsuite_po_status import register_status_route
+        register_status_route(app, cards, authenticate, lambda: os.environ.get('OM_CARD_PUSH_SECRET'),
+                              lambda: os.environ.get('NETSUITE_ACCOUNT_ID'), allow_short_key=allow_short_key)
+    except Exception:
+        app.logger.error('NetSuite PO status route disabled: setup failed')
 
     @app.post('/integrations/netsuite/cards/boards')
     def list_netsuite_card_boards():
