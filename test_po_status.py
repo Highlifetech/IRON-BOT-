@@ -33,11 +33,12 @@ class StatusTests(unittest.TestCase):
     def test_bill_and_payment_status_written(self):
         entries = validate_status_payload({'version': 1, 'account': '1', 'pos': [
             {'poId': '37358', 'nsStatus': 'Fully Billed', 'billingStatus': 'Billed', 'paymentStatus': 'Partially Paid',
-             'total': 1500, 'billed': 1500, 'paid': 500}]}, '1')
+             'total': 1500, 'billed': 1500, 'paid': 500, 'quantity': 300}]}, '1')
         self.assertEqual(apply_status(self.cards, entries[0])['status'], 'Status updated')
         m = self.master()
         self.assertEqual((m['Billing Status'], m['Payment Status'], m['Amount Paid'], m['PO Total']),
                          ('Billed', 'Partially Paid', 500.0, 1500.0))
+        self.assertEqual(m['Quantity'], 300.0)
         self.assertIn('Billing Last Synced', m)
 
     def test_unknown_po_is_reported_not_created(self):

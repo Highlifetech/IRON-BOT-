@@ -47,7 +47,8 @@ def validate_status(entry):
         raise PushError('INVALID_TEXT')
     return {'poId': str(entry['poId']), 'billingStatus': billing, 'paymentStatus': payment,
             'nsStatus': ns_status.strip(), 'total': _num(entry.get('total')),
-            'billed': _num(entry.get('billed')), 'paid': _num(entry.get('paid'))}
+            'billed': _num(entry.get('billed')), 'paid': _num(entry.get('paid')),
+            'quantity': _num(entry.get('quantity'))}
 
 
 def validate_status_payload(payload, account):
@@ -67,8 +68,8 @@ def status_fields(st):
         fields['Payment Status'] = st['paymentStatus']
     if st['nsStatus']:
         fields['NetSuite PO Status'] = st['nsStatus']
-    for key, name in (('total', 'PO Total'), ('billed', 'Amount Billed'), ('paid', 'Amount Paid')):
-        if st[key] is not None:
+    for key, name in (('total', 'PO Total'), ('billed', 'Amount Billed'), ('paid', 'Amount Paid'), ('quantity', 'Quantity')):
+        if st.get(key) is not None:
             fields[name] = st[key]
     return fields
 

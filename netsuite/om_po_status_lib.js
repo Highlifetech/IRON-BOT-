@@ -48,8 +48,20 @@ define(['N/query', 'N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/log'],
       let payment = 'Unpaid';
       if (paid > 0) payment = (billed > 0 && paid >= billed - 0.01) ? 'Paid' : 'Partially Paid';
 
+      // Total ordered quantity on product lines (no shipping / fee / mold lines).
+      let quantity = null;
+      try {
+        const q = query.runSuiteQL({
+          query: "SELECT SUM(tl.quantity) qty FROM transactionline tl JOIN item i ON i.id = tl.item " +
+                 "WHERE tl.transaction = ? AND tl.mainline = 'F' AND tl.itemtype IN ('InvtPart','NonInvtPart','Assembly','Kit') " +
+                 "AND NOT REGEXP_LIKE(LOWER(i.itemid), 'shipping|freight|fee|setup|mold|tax|discount|duty|tariff')",
+          params: [poId]
+        }).asMappedResults()[0];
+        if (q && q.qty !== null && q.qty !== '') quantity = Number(q.qty);
+      } catch (e) { log.debug('PO quantity unavailable', e.message || String(e)); }
+
       return {
-        poId: String(poId),
+        poId: String(poId), quantity,
         nsStatus: String(head.label || '').replace(/^Purchase Order\s*:\s*/, ''),
         billingStatus: billing, paymentStatus: payment,
         total: round(head.total), billed, paid
