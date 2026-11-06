@@ -599,6 +599,33 @@ def card_status(key, prior, cards, boards):
     return {'identity': key, 'status': 'Needs review — previous send unconfirmed' if prior else 'No linked card', 'url': None}
 
 
+# Lark's "table not found" code: the board's table was deleted in Lark.
+TABLE_NOT_FOUND = 1254041
+
+
+def _drop_deleted_boards(client, boards):
+    """Remove configured boards whose Lark table no longer exists.
+
+    A board deleted in Lark (e.g. an old test table) used to take the whole
+    review extension down at startup, which made NetSuite's order monitor get
+    404s. Only Lark's explicit table-not-found answer drops a board; any other
+    read failure keeps it, so a hiccup never removes a live board."""
+    import logging
+    log = logging.getLogger(__name__)
+    for key, board in list(boards.items()):
+        if not isinstance(board, dict) or not board.get('base') or not board.get('table'):
+            continue
+        try:
+            r = client._get(f"/open-apis/bitable/v1/apps/{board['base']}/tables/{board['table']}/fields",
+                            params={'page_size': 1})
+        except Exception as error:
+            log.warning('Board check skipped for %s: %s', key, type(error).__name__)
+            continue
+        if isinstance(r, dict) and r.get('code') == TABLE_NOT_FOUND:
+            log.warning('Board %s dropped: its Lark table no longer exists', key)
+            del boards[key]
+
+
 def _reconcile(client, catalog, boards, review_config=None, address_config=None):
     """Point configured boards at fields that still exist in Lark. Never blocks startup."""
     try:
@@ -634,7 +661,11 @@ def register(app):
         if not os.environ.get('DATABASE_URL') or len(os.environ.get('OM_CARD_PUSH_SECRET', '')) < (12 if allow_short_key else 32):
             raise PushError('INVALID_CONFIGURATION')
         # Instantiate bot credentials directly; never a client patched to act as a user.
-        cards = LarkCards(LarkClient(), boards, catalog)
+        client = LarkClient()
+        _drop_deleted_boards(client, boards)
+        if not boards:
+            raise PushError('INVALID_CONFIGURATION')
+        cards = LarkCards(client, boards, catalog)
         _reconcile(cards.client, catalog, boards)
         ledger = PostgresLedger(os.environ['DATABASE_URL'])
         ledger.initialize()
@@ -648,6 +679,8 @@ def register(app):
         from netsuite_card_review import ReviewService, register_routes
         try:
             config = json.loads(os.environ['OM_CARD_REVIEW_CONFIG'])
+            if isinstance(config, dict):
+                config = {k: v for k, v in config.items() if k in boards}
             if set(config) != set(boards): raise PushError('INVALID_REVIEW_CONFIGURATION')
             _reconcile(cards.client, catalog, boards, review_config=config)
             review = ReviewService(cards, ledger, config)
@@ -666,6 +699,7 @@ def register(app):
             if os.environ.get('OM_CARD_ADDRESS_CONFIG'):
                 from address_receiver import AddressService, register_address_routes
                 address_config=json.loads(os.environ['OM_CARD_ADDRESS_CONFIG'])
+                if isinstance(address_config,dict): address_config={k:v for k,v in address_config.items() if k in boards}
                 if isinstance(address_config,dict): _reconcile(cards.client,catalog,boards,review_config=config,address_config=address_config)
                 if not isinstance(address_config,dict) or not address_config or not set(address_config).issubset(boards):
                     raise PushError('INVALID_ADDRESS_CONFIGURATION')
@@ -673,8 +707,9 @@ def register(app):
                 address_service.initialize()
                 cards.address_config=address_config
                 register_address_routes(app,address_service,authorize)
-        except Exception:
-            app.logger.error('NetSuite review extension disabled: invalid configuration')
+        except Exception as error:
+            app.logger.error('NetSuite review extension disabled: invalid configuration (%s)',
+                             error if isinstance(error, PushError) else type(error).__name__)
             review=None
             cards.review_config={}
 
