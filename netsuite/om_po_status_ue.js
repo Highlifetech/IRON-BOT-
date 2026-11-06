@@ -6,16 +6,20 @@
  * Iron Bot (Master PO List row). Runs for every source: UI, Ramp sync, CSV.
  * Failures are logged and never block the save.
  *
- * Script parameters (same values as the PO script):
- *   custscript_om_po_status_url   https://<iron-bot-domain>/integrations/netsuite/po-status
- *   custscript_om_po_secret_id    API Secret id holding OM_CARD_PUSH_SECRET
+ * Optional script parameters (defaults below = same values as the PO script):
+ *   custscript_om_pst_url     https://<iron-bot-domain>/integrations/netsuite/po-status
+ *   custscript_om_pst_secret  API Secret id holding OM_CARD_PUSH_SECRET
  *
  * Deploy with: Execute As Role = Administrator, all execution contexts, status Released.
  *
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  */
-define(['N/query', 'N/log', './om_po_status_lib'], (query, log, lib) => {
+define(['N/query', 'N/runtime', 'N/log', './om_po_status_lib'], (query, runtime, log, lib) => {
+
+  // Same Iron Bot endpoint / API secret as the PO script (parameters optional).
+  const DEFAULT_URL = 'https://web-production-f965d.up.railway.app/integrations/netsuite/po-status';
+  const DEFAULT_SECRET = 'custsecretcustsecret_om_lark_card_push';
 
   const isId = (v) => /^[1-9][0-9]*$/.test(String(v || ''));
 
@@ -78,7 +82,12 @@ define(['N/query', 'N/log', './om_po_status_lib'], (query, log, lib) => {
         if (selfId) pos = pos.concat(lib.posLinkedTo([selfId]));
       }
 
-      if (pos.length) lib.send(pos);
+      if (pos.length) {
+        const script = runtime.getCurrentScript();
+        lib.send(pos,
+          script.getParameter({ name: 'custscript_om_pst_url' }) || DEFAULT_URL,
+          script.getParameter({ name: 'custscript_om_pst_secret' }) || DEFAULT_SECRET);
+      }
     } catch (e) {
       log.error('PO status trigger failed', e.message || String(e));
     }

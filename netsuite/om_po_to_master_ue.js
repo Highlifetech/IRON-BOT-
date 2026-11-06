@@ -13,10 +13,13 @@
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  */
-define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 'N/log', './om_po_status_lib'],
-  (https, crypto, encode, runtime, search, record, log, statusLib) => {
+define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 'N/query', 'N/log', './om_po_status_lib'],
+  (https, crypto, encode, runtime, search, record, query, log, statusLib) => {
 
     const text = (v) => (v === null || v === undefined) ? '' : String(v).trim();
+
+    // Never send an internal unit ID as a unit name; Iron Bot then uses "Each".
+    const unitName = (u) => (/^\d+$/.test(u) ? '' : u);
 
     const COPY_FIELDS = ['custcol_om_product_name', 'custcol_om_variant', 'custcol_om_sizes'];
 
@@ -58,7 +61,9 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 
       if (![ctx.UserEventType.CREATE, ctx.UserEventType.EDIT, ctx.UserEventType.XEDIT, ctx.UserEventType.APPROVE]
           .includes(ctx.type)) return;
       try {
-        const po = ctx.newRecord;
+        // Reload: on the after-submit record NetSuite returns unit IDs ("1") instead of
+        // unit names, and inline edits carry no lines. The saved record has both.
+        const po = record.load({ type: record.Type.PURCHASE_ORDER, id: ctx.newRecord.id });
         const poId = String(po.id);
         let poNumber = text(po.getValue('tranid'));
         if (!poNumber) poNumber = text(search.lookupFields({ type: 'purchaseorder', id: poId, columns: ['tranid'] }).tranid);
@@ -78,6 +83,14 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 
         // Product lines only (no shipping, fees, setup/mold, tax or discount lines).
         const SKIP_TYPES = ['Service', 'OthCharge', 'Discount', 'Markup', 'Subtotal', 'Description', 'Payment', 'ShipItem', 'TaxItem', 'TaxGroup'];
         const SKIP_NAME = /shipping|freight|fee|setup|mold|tax|discount|duty|tariff/i;
+        // Unit names by line key ("Piece"); the record API only gives the unit ID.
+        const unitByKey = {};
+        try {
+          query.runSuiteQL({
+            query: 'SELECT tl.uniquekey, BUILTIN.DF(tl.units) AS u FROM transactionline tl WHERE tl.transaction = ? AND tl.mainline = \'F\'',
+            params: [Number(poId)]
+          }).asMappedResults().forEach((r) => { unitByKey[String(r.uniquekey)] = text(r.u); });
+        } catch (e) { log.debug('Unit names unavailable', e.message || String(e)); }
         const lines = [];
         const n = po.getLineCount({ sublistId: 'item' });
         for (let i = 0; i < n && lines.length < 200; i++) {
@@ -95,7 +108,7 @@ define(['N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/search', 'N/record', 
             variant: text(get('custcol_om_variant')),
             sizes: text(get('custcol_om_sizes')),
             quantity: isFinite(qty) ? qty : null,
-            units: text(po.getSublistText({ sublistId: 'item', fieldId: 'units', line: i }))
+            units: unitByKey[key] || unitName(text(po.getSublistText({ sublistId: 'item', fieldId: 'units', line: i })))
           });
         }
 

@@ -56,9 +56,7 @@ define(['N/query', 'N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/log'],
       };
     }
 
-    function sign(body) {
-      const script = runtime.getCurrentScript();
-      const secretId = script.getParameter({ name: 'custscript_om_po_secret_id' });
+    function sign(body, secretId) {
       const ts = String(Math.floor(Date.now() / 1000));
       const hmac = crypto.createHmac({
         algorithm: crypto.HashAlg.SHA256,
@@ -68,16 +66,16 @@ define(['N/query', 'N/https', 'N/crypto', 'N/encode', 'N/runtime', 'N/log'],
       return { 'Content-Type': 'application/json', 'X-OM-Timestamp': ts, 'X-OM-Signature': hmac.digest({ outputEncoding: encode.Encoding.HEX }) };
     }
 
-    /** Send the current status of these POs to Iron Bot. Never throws. */
-    function send(poIds) {
+    /** Send the current status of these POs to Iron Bot. Never throws.
+     *  url / secretId come from the calling script's own parameters. */
+    function send(poIds, url, secretId) {
       try {
         const ids = Array.from(new Set((poIds || []).map(String).filter((id) => /^[1-9][0-9]*$/.test(id)))).slice(0, 50);
         if (!ids.length) return;
         const pos = ids.map(status).filter(Boolean);
         if (!pos.length) return;
         const body = JSON.stringify({ version: 1, account: runtime.accountId, pos });
-        const url = runtime.getCurrentScript().getParameter({ name: 'custscript_om_po_status_url' });
-        const res = https.post({ url, body, headers: sign(body) });
+        const res = https.post({ url, body, headers: sign(body, secretId) });
         log.audit('PO status to Lark', { pos: ids.join(','), code: res.code, body: (res.body || '').slice(0, 300) });
       } catch (e) {
         log.error('PO status to Lark failed', e.message || String(e));
