@@ -1,11 +1,11 @@
 /**
  * OM — PO status refresh (backfill + hourly safety net)
  * Map/Reduce. Sends every PO's current billing / payment status, totals and
- * quantity to Iron Bot in batches of 25, so the Lark Master PO List stays
+ * quantity to Iron Bot in batches of 8, so the Lark Master PO List stays
  * filled even if a live push was missed (e.g. during an Iron Bot restart).
  * Rows not in the Master PO List are skipped by Iron Bot. Read-only in NetSuite.
  *
- * Deploy: Scheduled hourly, Execute As Role = Administrator.
+ * Deploy: Scheduled nightly 11 pm PT, Execute As Role = Administrator.
  *
  * @NApiVersion 2.1
  * @NScriptType MapReduceScript
@@ -14,7 +14,7 @@ define(['N/query', 'N/log', './om_po_status_lib'], (query, log, lib) => {
 
   const URL = 'https://web-production-f965d.up.railway.app/integrations/netsuite/po-status';
   const SECRET = 'custsecretcustsecret_om_lark_card_push';
-  const BATCH = 25;
+  const BATCH = 8;
 
   function getInputData() {
     const ids = query.runSuiteQL({
