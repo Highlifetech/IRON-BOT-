@@ -1,13 +1,13 @@
 {
-  "built_at": 1794002064,
+  "built_at": 1794082888,
   "provider": "voyage",
   "dim": 1024,
-  "total_chunks": 15036,
-  "removed_sources": 25,
-  "duration_sec": 17664.6,
-  "indexed_sources": 5361,
-  "indexed_chunks": 10158,
-  "skipped": 5831,
-  "attachments_read": 555,
+  "total_chunks": 15047,
+  "removed_sources": 0,
+  "duration_sec": 15810.9,
+  "indexed_sources": 1549,
+  "indexed_chunks": 3886,
+  "skipped": 9653,
+  "attachments_read": 1,
   "chats_read": 51
 }
