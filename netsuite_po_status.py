@@ -122,8 +122,13 @@ def line_changed(old_fields, new_line):
     return _text(old_fields.get('Sizes')).strip() != (new_line.get('sizes') or '').strip()
 
 
-def update_card_quantity(cards, key, new_line, since_ms):
-    """Push a changed quantity / Sizes to the production card(s) for this PO line."""
+def update_card_quantity(cards, key, new_line, since_ms, po_number=None, po_line_rid=None, single_line=False):
+    """Push a changed NetSuite quantity to the production card(s) for this PO line. One way: NetSuite -> Lark.
+
+    Cards carrying the line ID get the new quantity whatever their age. Size rows are
+    only rebuilt on cards made after the cutoff (older size rows were typed by hand).
+    A hand-made card without the line ID is matched through its PO, then stamped with
+    the line ID so later changes go straight to it."""
     updated = 0
     for board, b in cards.boards.items():
         try:
@@ -131,21 +136,67 @@ def update_card_quantity(cards, key, new_line, since_ms):
         except PushError:
             continue
         for row in rows:
-            try:
-                created = int(row.get('created_time') or 0)
-            except (TypeError, ValueError):
-                created = 0
-            if created and created <= since_ms:
-                continue  # older cards are never changed
-            if created == 0 and not _is_new(cards, b, row['record_id'], since_ms):
-                continue
-            f = b['fields']
-            if new_line.get('quantity') is not None:
-                cards.client.update_record_fields(b['table'], row['record_id'], {f['quantity']: new_line['quantity']},
-                                                  app_token=b['base'])
-            _update_sizes(cards, board, row, new_line)
+            _set_quantity(cards, b, row['record_id'], new_line)
+            created = _created(row)
+            if (created and created > since_ms) or (created == 0 and _is_new(cards, b, row['record_id'], since_ms)):
+                _update_sizes(cards, board, row, new_line)
             updated += 1
+    if updated or not po_number:
+        return updated
+    for board, b, row in _unlinked_cards_for_line(cards, po_number, po_line_rid, single_line):
+        _set_quantity(cards, b, row['record_id'], new_line, stamp=key)
+        log.info('Linked hand-made card %s on %s to %s and set quantity', row['record_id'], board, key)
+        updated += 1
     return updated
+
+
+def _created(row):
+    try:
+        return int(row.get('created_time') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_quantity(cards, b, record_id, new_line, stamp=None):
+    fields = {}
+    if new_line.get('quantity') is not None:
+        fields[b['fields']['quantity']] = new_line['quantity']
+    if stamp:
+        fields[b['fields']['identity']] = stamp
+    if fields:
+        cards.client.update_record_fields(b['table'], record_id, fields, app_token=b['base'])
+
+
+def _unlinked_cards_for_line(cards, po_number, po_line_rid, single_line):
+    """Cards on this PO with no line ID. A card whose App PO Line points at this line wins;
+    otherwise only a PO with one line and exactly one such card is matched. Never a guess."""
+    by_line, others = [], []
+    for board, b in cards.boards.items():
+        path = f"/open-apis/bitable/v1/apps/{b['base']}/tables/{b['table']}/records/search"
+        body = {'filter': {'conjunction': 'and', 'conditions': [
+            {'field_name': PO_NUMBER_FIELD, 'operator': 'is', 'value': [po_number]}]}}
+        try:
+            r = cards.client._post(path, body=body, params={'page_size': 50})
+        except Exception:
+            continue
+        if r.get('code') != 0:
+            continue
+        for row in (r.get('data') or {}).get('items') or []:
+            f = row.get('fields') or {}
+            if _text(f.get(b['fields']['identity'])).strip():
+                continue
+            if po_line_rid and po_line_rid in _relation_ids(f.get('App PO Line')):
+                by_line.append((board, b, row))
+            else:
+                others.append((board, b, row))
+    if by_line:
+        return by_line
+    if single_line and len(others) == 1:
+        return others
+    return []
+
+
+PO_NUMBER_FIELD = 'PO Number'
 
 
 def _is_new(cards, b, record_id, since_ms):

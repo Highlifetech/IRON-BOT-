@@ -79,11 +79,46 @@ class QuantityTests(unittest.TestCase):
         self.assertEqual(c['fields']['Ordered Quantity'], 250)
         self.assertEqual(self.lark.t['master'][0]['fields']['Quantity'], 550)
 
-    def test_old_card_never_changed(self):
+    def test_old_linked_card_gets_quantity_but_not_sizes(self):
         rid = card(self.lark, self.key, 200, created=500)
-        self.resave(quantity=250)
+        self.lark.clock = 501
+        s = self.lark.create_record('variants', {'Size': 'S', 'Quantity': 40, 'Card': [rid]})['record_id']
+        next(r for r in self.lark.t['cards'] if r['record_id'] == rid)['fields']['Variants'] = [s]
+        self.resave(quantity=250, sizes='S 100, M 150')
         c = next(r for r in self.lark.t['cards'] if r['record_id'] == rid)
-        self.assertEqual(c['fields']['Ordered Quantity'], 200)
+        self.assertEqual(c['fields']['Ordered Quantity'], 250)
+        self.assertEqual([r['fields']['Quantity'] for r in self.lark.t['variants']], [40])
+
+    def _handmade(self, po='PO-1', app_line=None, qty=200):
+        self.lark.clock = 500
+        f = {'PO Number': po, 'Ordered Quantity': qty}
+        if app_line: f['App PO Line'] = [app_line]
+        return self.lark.create_record('cards', f)['record_id']
+
+    def _po_line_rid(self, key):
+        return next(r['record_id'] for r in self.lark.t[PO_LINES_TABLE] if r['fields']['NetSuite line ID'] == key)
+
+    def test_handmade_card_matched_by_app_po_line_and_stamped(self):
+        po = self.lark.t['master'][0]['fields']['PO']
+        rid = self._handmade(po, app_line=self._po_line_rid(self.key))
+        other = self._handmade(po)
+        self.resave(quantity=250)
+        c = {r['record_id']: r['fields'] for r in self.lark.t['cards']}
+        self.assertEqual((c[rid]['Ordered Quantity'], c[rid]['Key']), (250, self.key))
+        self.assertEqual(c[other]['Ordered Quantity'], 200)
+
+    def test_handmade_card_not_guessed_on_multi_line_po(self):
+        po = self.lark.t['master'][0]['fields']['PO']
+        rid = self._handmade(po)
+        self.resave(quantity=250)
+        self.assertEqual(next(r for r in self.lark.t['cards'] if r['record_id'] == rid)['fields']['Ordered Quantity'], 200)
+
+    def test_single_line_po_matches_its_only_card(self):
+        upsert_po_header(self.cards, validate_po_header(payload([LINES[0]]), '1'))
+        po = self.lark.t['master'][0]['fields']['PO']
+        rid = self._handmade(po)
+        upsert_po_header(self.cards, validate_po_header(payload([dict(LINES[0], quantity=250)]), '1'))
+        self.assertEqual(next(r for r in self.lark.t['cards'] if r['record_id'] == rid)['fields']['Ordered Quantity'], 250)
 
     def test_unchanged_quantity_leaves_team_edits_alone(self):
         rid = card(self.lark, self.key, 210, created=5_000)  # team typed 210
