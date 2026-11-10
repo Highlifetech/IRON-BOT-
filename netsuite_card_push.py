@@ -8,6 +8,7 @@ Install SQL migration and verify field mappings before enabling. This module is
 inert unless register() is called with OM_CARD_PUSH_ENABLED=true. Authentication
 uses a separate restricted signing secret, never a URL/client-side credential.
 """
+import requests
 import hashlib
 import hmac
 import json
@@ -181,6 +182,22 @@ class PostgresLedger:
                 row = cur.fetchone()
         return owned, {'board': row[0], 'fingerprint': row[1], 'record_id': row[2]}
 
+    def release(self, key):
+        """Free a reservation whose create Lark explicitly rejected (nothing was made)."""
+        import psycopg2
+        with closing(psycopg2.connect(self.dsn, connect_timeout=10)) as conn, conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM om_ns_card_push WHERE identity=%s AND record_id IS NULL', (key,))
+
+    def reassign(self, key, old_record_id, board, fingerprint):
+        """Take over a line whose card was deleted in Lark. Only one caller wins."""
+        import psycopg2
+        with closing(psycopg2.connect(self.dsn, connect_timeout=10)) as conn, conn:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE om_ns_card_push SET board=%s,fingerprint=%s,record_id=NULL,created_at=now(),completed_at=NULL '
+                            'WHERE identity=%s AND record_id=%s', (board, fingerprint, key, old_record_id))
+                return cur.rowcount == 1
+
     def complete(self, key, record_id):
         import psycopg2
         with closing(psycopg2.connect(self.dsn, connect_timeout=10)) as conn, conn:
@@ -206,7 +223,19 @@ FRIENDLY_REASONS = {
 }
 
 
+class CreateRejected(PushError):
+    """Lark answered the create with an error code: no card was made, safe to retry."""
+    def __init__(self, board, code, msg):
+        super().__init__('LARK_REJECTED_CARD')
+        self.board, self.code, self.msg = board, code, msg
+
+    def detail(self):
+        return f'{self.board}: Lark code {self.code} — {self.msg}'
+
+
 def friendly_reason(error):
+    if isinstance(error, CreateRejected):
+        return f'Needs review — Lark refused the card ({error.msg or error.code}). Fix the board and send again'
     code = str(error) if isinstance(error, PushError) else ''
     if code in FRIENDLY_REASONS:
         return 'Needs review — ' + FRIENDLY_REASONS[code]
@@ -214,6 +243,14 @@ def friendly_reason(error):
 
 
 PRODUCT_FIELD_NAMES = ('Product Name', 'Products')
+RECORD_NOT_FOUND_CODES = (1254043,)
+
+
+def _json_or_none(response):
+    try:
+        return response.json() if response is not None else None
+    except ValueError:
+        return None
 
 
 class LarkCards:
@@ -384,7 +421,7 @@ class LarkCards:
                            cfg['copied_at']:int(time.time()*1000)})
         # SO/customer/vendor are lookups through the existing master relation.
         # No write to production stage, shipments, approval, artwork or dates.
-        result = self.client.create_record(b['table'], fields, app_token=b['base'])
+        result = self._create_card(board, b, fields)
         if not re.fullmatch(r'rec[A-Za-z0-9]+', result.get('record_id', '')):
             raise PushError('CREATE_RESULT_UNCONFIRMED')
         # Every production board now uses one Status dropdown (Production Flow
@@ -399,6 +436,39 @@ class LarkCards:
                 log.info('Starting status not set on %s %s', board, result['record_id'])
         result['sizes'] = self.add_sizes(board, result['record_id'], line)
         return result
+
+    def _create_card(self, board, b, fields):
+        try:
+            return self.client.create_record(b['table'], fields, app_token=b['base'])
+        except requests.HTTPError as error:
+            data = _json_or_none(error.response)
+            if not isinstance(data, dict) or not data.get('code'):
+                raise  # unknown outcome: keep the reservation
+            raise CreateRejected(board, data.get('code'), str(data.get('msg') or '')[:200])
+        except Exception as error:
+            text = str(error)
+            if not text.startswith('Create record failed:'):
+                raise
+            code = re.search(r"'code': (-?[0-9]+)", text)
+            msg = re.search(r"'msg': '([^']*)'", text)
+            raise CreateRejected(board, int(code.group(1)) if code else None, (msg.group(1) if msg else text)[:200])
+
+    def exists(self, board, record_id):
+        """True/False only when Lark says so; anything else raises."""
+        b = self.boards[board]
+        path = f"/open-apis/bitable/v1/apps/{b['base']}/tables/{b['table']}/records/{record_id}"
+        try:
+            data = self.client._get(path)
+        except requests.HTTPError as error:
+            data = _json_or_none(error.response)
+            if not isinstance(data, dict):
+                raise PushError('LARK_READ_FAILED')
+        code = data.get('code')
+        if code == 0:
+            return True
+        if code in RECORD_NOT_FOUND_CODES:
+            return False
+        raise PushError('LARK_READ_FAILED')
 
     def add_sizes(self, board, record_id, line):
         """Starting Variants rows from the NetSuite Sizes column. Editable after.
@@ -459,10 +529,20 @@ def process(line, ledger, cards):
             status = 'Existing card — source changed; review required'
         return {'identity': key, 'status': status, 'url': cards.url(board, rid)}
     if not owned:
-        # A prior writer may still be running or the result may not be visible yet.
-        # No time-based lease takeover: it could create a duplicate after timeout.
-        return {'identity': key, 'status': 'Needs review — prior send unconfirmed', 'url': None}
-    result = cards.create(board, line)
+        # A card made earlier but since deleted in Lark (e.g. sent to the wrong
+        # board and removed) may be sent again, to the board chosen now. Only
+        # when Lark confirms the record is gone; one caller wins the takeover.
+        if not (prior['record_id'] and not cards.exists(board, prior['record_id'])
+                and ledger.reassign(key, prior['record_id'], requested, fingerprint)):
+            # A prior writer may still be running or the result may not be visible yet.
+            # No time-based lease takeover: it could create a duplicate after timeout.
+            return {'identity': key, 'status': 'Needs review — prior send unconfirmed', 'url': None}
+        board = requested
+    try:
+        result = cards.create(board, line)
+    except CreateRejected:
+        ledger.release(key)  # Lark refused it, so nothing exists: a resend may try again.
+        raise
     ledger.complete(key, result['record_id'])
     out = {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
     if result.get('sizes'):
@@ -558,7 +638,9 @@ def upsert_po_lines(cards, line, master_id):
             if line_changed(old_fields, l):
                 try:
                     from netsuite_card_fill import FILL_SINCE_MS
-                    update_card_quantity(cards, key, l, FILL_SINCE_MS)
+                    if not update_card_quantity(cards, key, l, FILL_SINCE_MS):
+                        log.warning('NetSuite quantity/sizes changed for %s but no linked card was updated '
+                                    '(no card carries this line ID, or it predates the sync cutoff)', key)
                 except Exception as error:
                     log.warning('Card quantity update failed for %s: %s', key,
                                 error if isinstance(error, PushError) else type(error).__name__)
@@ -857,10 +939,17 @@ def register(app):
                 if review and result['status']=='Created':
                     prior=ledger.lookup_many([line['identity']])[line['identity']]
                     review.record_creation(line,prior['record_id'],payload.get('actorId',''))
+                if result['status'] != 'Created':
+                    app.logger.info('NetSuite card send for %s: %s', line['identity'], result['status'])
                 results.append(result)
             except Exception as error:
-                reason = str(error) if isinstance(error, PushError) else type(error).__name__
-                app.logger.warning('NetSuite card send requires review: %s', reason)
+                if isinstance(error, CreateRejected):
+                    reason = error.detail()
+                elif isinstance(error, PushError):
+                    reason = str(error)
+                else:
+                    reason = f'{type(error).__name__}: {str(error)[:300]}'
+                app.logger.warning('NetSuite card send requires review (%s): %s', line['identity'], reason)
                 # Never leak raw API/database errors; a signed retry only reconciles.
                 results.append({'identity': line['identity'], 'status': friendly_reason(error), 'url': None})
         return jsonify(results=results)
