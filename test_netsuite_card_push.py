@@ -1,6 +1,6 @@
 import copy, hashlib, hmac, threading, unittest
 from concurrent.futures import ThreadPoolExecutor
-from netsuite_card_push import authenticate, validate_payload, process, PushError, card_status, validate_status_payload
+from netsuite_card_push import authenticate, validate_payload, process, PushError, card_status, validate_status_payload, CreateRejected, LarkCards
 LINE={'identity':'99999999:purchaseorder:10001:101','account':'99999999','destination':'test','poId':'10001','poLineKey':'101','itemId':'1','vendorId':'126','quantity':100,'product':'Beanie','description':'Black patch','units':'Each','poNumber':'PO-EXAMPLE-1','soNumber':'SO-EXAMPLE-1','customer':'Customer','vendor':'Vendor'}
 class Ledger:
     def __init__(self):self.rows={};self.lock=threading.Lock()
@@ -11,11 +11,22 @@ class Ledger:
             return owned,dict(self.rows[key])
     def complete(self,key,rid):
         with self.lock:self.rows[key]['record_id']=rid
+    def release(self,key):
+        with self.lock:
+            if self.rows.get(key,{}).get('record_id') is None:self.rows.pop(key,None)
+    def reassign(self,key,old,board,fingerprint):
+        with self.lock:
+            if self.rows.get(key,{}).get('record_id')!=old:return False
+            self.rows[key]={'board':board,'fingerprint':fingerprint,'record_id':None};return True
 class Cards:
-    def __init__(self):self.rows={};self.creates=0;self.ambiguous=False;self.fail_before=False
+    def __init__(self):self.rows={};self.creates=0;self.ambiguous=False;self.fail_before=False;self.reject=False;self.unreadable=False
     def find(self,board,key):return self.rows.get((board,key),[])
+    def exists(self,board,rid):
+        if self.unreadable:raise PushError('LARK_READ_FAILED')
+        return any(r['record_id']==rid for (b,_),rows in self.rows.items() if b==board for r in rows)
     def create(self,board,line):
         self.creates+=1
+        if self.reject:raise CreateRejected(board,1254045,'FieldNameNotFound')
         if self.fail_before:raise TimeoutError()
         result={'record_id':'recTEST1'};self.rows[(board,line['identity'])]=[result]
         if self.ambiguous:raise TimeoutError()
@@ -53,9 +64,35 @@ class ReceiverTests(unittest.TestCase):
         self.cards.rows[('test',LINE['identity'])]=[{'record_id':'recA'},{'record_id':'recB'}]
         with self.assertRaises(PushError):self.runline()
         self.assertEqual(self.cards.creates,0)
-    def test_deleted_card_not_recreated(self):
+    def test_deleted_card_can_be_sent_again(self):
         self.runline();self.cards.rows={}
-        self.assertIn('unconfirmed',self.runline()['status']);self.assertEqual(self.cards.creates,1)
+        self.assertEqual(self.runline()['status'],'Created');self.assertEqual(self.cards.creates,2)
+    def test_deleted_card_resent_to_new_board(self):
+        self.runline();self.cards.rows={};self.line['destination']='other'
+        result=self.runline()
+        self.assertEqual(result['status'],'Created');self.assertIn('/other/',result['url'])
+        self.assertEqual(self.ledger.rows[LINE['identity']]['board'],'other')
+    def test_deleted_card_unreadable_is_not_recreated(self):
+        self.runline();self.cards.rows={};self.cards.unreadable=True
+        with self.assertRaises(PushError):self.runline()
+        self.assertEqual(self.cards.creates,1)
+    def test_rejected_create_can_retry(self):
+        self.cards.reject=True
+        with self.assertRaises(CreateRejected):self.runline()
+        self.assertNotIn(LINE['identity'],self.ledger.rows)
+        self.cards.reject=False;self.assertEqual(self.runline()['status'],'Created');self.assertEqual(self.cards.creates,2)
+    def test_lark_error_text_becomes_rejection(self):
+        class Client:
+            def create_record(self,table,fields,app_token=None):
+                raise Exception("Create record failed: {'code': 1254045, 'msg': 'FieldNameNotFound', 'data': {}}")
+        cards=LarkCards(Client(),{'b':{'base':'bas','table':'tbl','fields':{}}},{})
+        with self.assertRaises(CreateRejected) as ctx:cards._create_card('b',cards.boards['b'],{})
+        self.assertEqual(ctx.exception.code,1254045);self.assertIn('FieldNameNotFound',ctx.exception.detail())
+    def test_unknown_create_error_keeps_lock(self):
+        class Client:
+            def create_record(self,table,fields,app_token=None):raise TimeoutError('slow')
+        cards=LarkCards(Client(),{'b':{'base':'bas','table':'tbl','fields':{}}},{})
+        with self.assertRaises(TimeoutError):cards._create_card('b',cards.boards['b'],{})
     def test_signature_and_tampering(self):
         raw=b'{"version":1}';stamp='1800000000';secret='test-only-secret-'*3
         sig=hmac.new(secret.encode(),stamp.encode()+b'.'+raw,hashlib.sha256).hexdigest()
