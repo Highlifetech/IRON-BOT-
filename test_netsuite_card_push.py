@@ -80,12 +80,26 @@ class CatalogTests(unittest.TestCase):
         class Client:
             def _post(self,*a,**k):return {'code':0,'data':{'items':[{'record_id':'recMASTER','fields':outer.header}]}}
             def create_record(self,table,fields,app_token):outer.created.append(fields);return {'record_id':'recNEW'}
+            def update_record_fields(self,table,record_id,fields,app_token=None):outer.updated.append((record_id,fields))
+        self.updated=[]
         self.cards=LarkCards(Client(),{'test':{'base':'base','table':'table','fields':{'identity':'Key','product':'Products','description':'Description','quantity':'Ordered Quantity','po_relation':'Select PO','units':'Unit'}}},{'base':'base','table':'master','po_id_field':'NetSuite PO ID'})
     def test_exact_master_links_and_uses_underlying_quantity(self):
         self.cards.create('test',LINE)
         self.assertEqual(self.created[0]['Ordered Quantity'],100)
         self.assertEqual(self.created[0]['Select PO'],['recMASTER'])
         self.assertNotIn('Quantity',self.created[0])
+    def test_configured_board_card_starts_at_pending_artwork(self):
+        self.cards.create('test',LINE)
+        self.assertEqual(self.updated,[('recNEW',{'Status':'Pending Artwork'})])
+    def test_board_with_initial_fields_is_not_set_twice(self):
+        self.cards.boards['test']['initial_fields']={'Status':'Pending Artwork'}
+        self.cards.create('test',LINE)
+        self.assertEqual(self.created[0]['Status'],'Pending Artwork')
+        self.assertEqual(self.updated,[])
+    def test_status_failure_never_fails_the_card(self):
+        def boom(*a,**k):raise RuntimeError('no field')
+        self.cards.client.update_record_fields=boom
+        self.assertEqual(self.cards.create('test',LINE)['record_id'],'recNEW')
     def test_changed_supplier_or_so_stops_creation(self):
         for field in ['NetSuite Supplier ID','Sales Order','NetSuite PO ID','PO']:
             old=self.header[field];self.header[field]='changed'

@@ -23,6 +23,10 @@ from urllib.parse import urlencode
 
 log = logging.getLogger(__name__)
 
+# New production cards start here (single Status dropdown on every board).
+STATUS_FIELD = 'Status'
+STARTING_STATUS = 'Pending Artwork'
+
 
 class PushError(Exception):
     pass
@@ -383,6 +387,16 @@ class LarkCards:
         result = self.client.create_record(b['table'], fields, app_token=b['base'])
         if not re.fullmatch(r'rec[A-Za-z0-9]+', result.get('record_id', '')):
             raise PushError('CREATE_RESULT_UNCONFIRMED')
+        # Every production board now uses one Status dropdown (Production Flow
+        # was removed). Boards set up in config have no initial_fields, so a new
+        # card would start blank. Set Pending Artwork after creating; a board
+        # without that field or option just keeps the card as created.
+        if 'initial_fields' not in b and STATUS_FIELD not in fields:
+            try:
+                self.client.update_record_fields(b['table'], result['record_id'],
+                                                 {STATUS_FIELD: STARTING_STATUS}, app_token=b['base'])
+            except Exception:
+                log.info('Starting status not set on %s %s', board, result['record_id'])
         result['sizes'] = self.add_sizes(board, result['record_id'], line)
         return result
 
