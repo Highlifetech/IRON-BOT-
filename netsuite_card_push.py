@@ -132,6 +132,9 @@ def starting_name_and_description(line):
     return name[:200], description
 
 
+SIZE_PAIR = r'([A-Za-z0-9/.]*[A-Za-z])\s*[:=\-×]?\s*(\d+)'
+
+
 def parse_sizes(text):
     """'S 40, M 60' / 'S:40; M:60' / one per line -> [('S', 40), ('M', 60)].
 
@@ -141,6 +144,12 @@ def parse_sizes(text):
     for chunk in re.split(r'[,;\n|]+', text or ''):
         chunk = chunk.strip()
         if not chunk:
+            continue
+        # Several sizes in one chunk with only spaces between them ("S-15 M-30 L-20").
+        # Only when every piece is a one-word size followed by its number.
+        pairs = re.findall(SIZE_PAIR, chunk)
+        if len(pairs) > 1 and re.fullmatch(rf'(?:{SIZE_PAIR}\s*)+', chunk):
+            rows.extend((size[:40], int(qty)) for size, qty in pairs)
             continue
         m = re.fullmatch(r'(.+?)\s*[:=\-x×]?\s*(\d+)', chunk)
         if not m or not m.group(1).strip(' :=-x×'):
