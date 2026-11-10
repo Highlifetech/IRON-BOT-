@@ -647,9 +647,9 @@ def upsert_po_lines(cards, line, master_id):
             if line_changed(old_fields, l):
                 try:
                     from netsuite_card_fill import FILL_SINCE_MS
-                    if not update_card_quantity(cards, key, l, FILL_SINCE_MS):
-                        log.warning('NetSuite quantity/sizes changed for %s but no linked card was updated '
-                                    '(no card carries this line ID, or it predates the sync cutoff)', key)
+                    if not update_card_quantity(cards, key, l, FILL_SINCE_MS, po_number=line['poNumber'],
+                                                po_line_rid=rows[0]['record_id'], single_line=len(line['lines']) == 1):
+                        log.warning('NetSuite quantity/sizes changed for %s but no card could be matched', key)
                 except Exception as error:
                     log.warning('Card quantity update failed for %s: %s', key,
                                 error if isinstance(error, PushError) else type(error).__name__)
