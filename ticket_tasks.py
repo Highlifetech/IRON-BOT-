@@ -106,6 +106,11 @@ class TicketTasks:
                 continue
             if not all(k in fields for k in REQUIRED):
                 continue
+            # The bot must be able to write the task id back; a formula/lookup Task ID would
+            # make every poll create the same task again.
+            if fields['Task ID'].get('type') != 1:
+                log.warning('Ticket tasks: skipping %s, its Task ID field is not a text field', name)
+                continue
             card_table = ((fields['Order Item'].get('property') or {}).get('table_id'))
             if not card_table:
                 continue

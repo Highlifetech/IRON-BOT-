@@ -4,7 +4,8 @@ import ticket_tasks
 from ticket_tasks import TicketTasks, summary_for, is_ticket
 
 PU, CARD = 'tblPU', 'tblCARD'
-FIELDS = [{'field_name': n} for n in ('Type', 'Done', 'Assigned to', 'Details', 'Task ID')] + \
+FIELDS = [{'field_name': n} for n in ('Type', 'Done', 'Assigned to', 'Details')] + \
+         [{'field_name': 'Task ID', 'type': 1}] + \
          [{'field_name': 'Order Item', 'property': {'table_id': CARD}}]
 
 
@@ -123,6 +124,17 @@ class TicketTaskTests(unittest.TestCase):
         self.assertTrue(s.startswith('Problem: a a'))
         self.assertTrue(s.endswith('— LFDY — PO1'))
 
+
+
+class GuardTests(unittest.TestCase):
+    def test_formula_task_id_table_is_skipped(self):
+        lark = FakeLark([])
+        old = list(FIELDS)
+        try:
+            FIELDS[:] = [f if f['field_name'] != 'Task ID' else {'field_name': 'Task ID', 'type': 20} for f in FIELDS]
+            self.assertEqual(TicketTasks(lark, 'base').discover(force=True), {})
+        finally:
+            FIELDS[:] = old
 
 if __name__ == '__main__':
     unittest.main()
