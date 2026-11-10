@@ -84,6 +84,9 @@ class ProductNameAndSizesTests(unittest.TestCase):
         self.assertEqual(self.parse('S 15 M 30 L 20 XL 5')[0],[('S',15),('M',30),('L',20),('XL',5)])
         self.assertEqual(self.parse('2XL:10 3XL:5')[0],[('2XL',10),('3XL',5)])
         self.assertEqual(self.parse('Youth M 20')[0],[('Youth M',20)])
+        self.assertEqual(self.parse('7 & 10'),([],['7','10']))
+        self.assertEqual(self.parse('7-25 & 10-25')[0],[('7',25),('10',25)])
+        self.assertEqual(self.parse('S 10 and M 20')[0],[('S',10),('M',20)])
         rows,bad=self.parse('S 40, oops');self.assertEqual((rows,bad),([('S',40)],['oops']))
     def test_card_gets_variant_rows_with_color_and_total_check(self):
         lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)

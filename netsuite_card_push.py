@@ -141,7 +141,8 @@ def parse_sizes(text):
     The last whole number in each chunk is the quantity; the rest is the size.
     Chunks that don't parse are returned separately so nothing is silently lost."""
     rows, bad = [], []
-    for chunk in re.split(r'[,;\n|]+', text or ''):
+    # '&' and 'and' separate sizes too ("7 & 10" is two sizes, not size "7 &" x 10).
+    for chunk in re.split(r'[,;\n|&]+|\s+and\s+', text or '', flags=re.I):
         chunk = chunk.strip()
         if not chunk:
             continue
@@ -151,7 +152,8 @@ def parse_sizes(text):
         if len(pairs) > 1 and re.fullmatch(rf'(?:{SIZE_PAIR}\s*)+', chunk):
             rows.extend((size[:40], int(qty)) for size, qty in pairs)
             continue
-        m = re.fullmatch(r'(.+?)\s*[:=\-x×]?\s*(\d+)', chunk)
+        # A bare number is a size with no quantity ("10"), not size "1" x 0.
+        m = None if re.fullmatch(r'\d+', chunk) else re.fullmatch(r'(.+?)\s*[:=\-x×]?\s*(\d+)', chunk)
         if not m or not m.group(1).strip(' :=-x×'):
             bad.append(chunk)
             continue
