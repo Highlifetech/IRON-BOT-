@@ -3327,6 +3327,16 @@ def _start_background_tasks():
         threading.Thread(target=_comment_poll_loop, daemon=True).start()
         logger.info(f"Comment polling started (interval={COMMENT_POLL_INTERVAL}s)")
 
+    # Production Updates tickets (Approval / Question / Problem) -> Lark Tasks.
+    # Set OM_TICKET_TASKS_ENABLED=false on Railway to switch off.
+    if os.environ.get("OM_TICKET_TASKS_ENABLED", "true").lower() != "false":
+        try:
+            import ticket_tasks
+            threading.Thread(target=ticket_tasks.loop, args=(lark,), daemon=True).start()
+            logger.info("Ticket tasks loop started")
+        except Exception as e:
+            logger.error(f"Ticket tasks loop not started: {e}")
+
     try:
         scheduler = BackgroundScheduler(daemon=True)
         # --- COMBINED 7 AM MORNING BRIEFING (Mon-Sat) ---
