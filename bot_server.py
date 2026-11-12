@@ -42,6 +42,7 @@ from config import (
     FIELD_CLIENT_EMAIL,
     SKIP_STATUSES, DIGEST_EXCLUDED_BOARDS,
     LARK_CHAT_ID_DIGEST, DIGEST_SECRET,
+    LARK_VERIFICATION_TOKEN, CARD_CALLBACK_VERIFICATION_TOKEN,
     ALL_ORDERS_VIEW_KEYWORD,
     ALT_ORDER_NUM_FIELDS, ALT_CLIENT_FIELDS, ALT_STATUS_FIELDS, ALT_DUE_DATE_FIELDS,
     LARK_CHAT_ID_CHEN, LARK_CHAT_ID_HANNAH_ARTWORK, LARK_CHAT_ID_LUCY_ARTWORK,
@@ -2635,9 +2636,42 @@ def _poll_update_request_cards():
 
 # FLASK ROUTES
 # =========================================================================
+
+# ---- Security gates (added 2026-11-11) ----
+import hmac as _hmac
+
+def _lark_token_ok(body, expected):
+    """True when a Lark event/callback carries the app's verification token.
+    v1 payloads (incl. url_verification) put it at body.token, v2 at header.token."""
+    if not expected:
+        logger.warning("SECURITY: verification token not configured; rejecting request")
+        return False
+    tok = body.get("token") or (body.get("header") or {}).get("token") or ""
+    return _hmac.compare_digest(str(tok), str(expected))
+
+
+def _header_secret_ok(header_name, expected):
+    """Secrets are accepted only from a request header, never the query string."""
+    if not expected:
+        return False
+    return _hmac.compare_digest(request.headers.get(header_name, ""), expected)
+
+
+_BUTTON_SECRET = os.environ.get("IRONBOT_BUTTON_SECRET", "").strip()
+
+
+def _button_auth_failed():
+    if not _header_secret_ok("X-IronBot-Secret", _BUTTON_SECRET):
+        logger.warning(f"SECURITY: rejected unauthenticated call to {request.path}")
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.get_json(silent=True) or {}
+    if not _lark_token_ok(body, LARK_VERIFICATION_TOKEN):
+        logger.warning("SECURITY: /webhook rejected (bad or missing Lark verification token)")
+        return jsonify({"error": "unauthorized"}), 401
     if body.get("type") == "url_verification":
         return jsonify({"challenge": body.get("challenge", "")})
     header = body.get("header", {})
@@ -2713,8 +2747,8 @@ _pdf_backfill_state = {"running": False, "last": None}
 
 @app.route("/pdf-preview/admin", methods=["GET", "POST"])
 def pdf_preview_admin():
-    """?key=PDF_ADMIN_SECRET&action=chats|join|backfill|status[&days=30][&dry=1]"""
-    if not _PDF_ADMIN_SECRET or request.args.get("key", "") != _PDF_ADMIN_SECRET:
+    """Header X-Admin-Key: PDF_ADMIN_SECRET; ?action=chats|join|backfill|status[&days=30][&dry=1]"""
+    if not _header_secret_ok("X-Admin-Key", _PDF_ADMIN_SECRET):
         return jsonify({"error": "unauthorized"}), 401
     from config import LARK_APP_ID
     action = request.args.get("action", "chats")
@@ -2766,42 +2800,60 @@ def pdf_preview_admin():
 @app.route("/card-callback", methods=["POST"])
 def card_callback():
     body = request.get_json(silent=True) or {}
+    if not _lark_token_ok(body, CARD_CALLBACK_VERIFICATION_TOKEN or LARK_VERIFICATION_TOKEN):
+        logger.warning("SECURITY: /card-callback rejected (bad or missing verification token)")
+        return jsonify({"error": "unauthorized"}), 401
     if body.get("type") == "url_verification":
         return jsonify({"challenge": body.get("challenge", "")})
     result = handle_card_callback(body)
     return jsonify(result)
 
 
-@app.route("/art-review/<table_id>/<record_id>", methods=["POST", "GET"])
+@app.route("/art-review/<table_id>/<record_id>", methods=["POST"])
 def art_review_endpoint(table_id, record_id):
+    _denied = _button_auth_failed()
+    if _denied:
+        return _denied
     body = request.get_json(silent=True) or {}
     requested_by = body.get("requested_by", "")
     threading.Thread(target=handle_art_review_button, args=(table_id, record_id, requested_by), daemon=True).start()
     return jsonify({"status": "accepted"})
 
 
-@app.route("/notify/<table_id>/<record_id>", methods=["POST", "GET"])
+@app.route("/notify/<table_id>/<record_id>", methods=["POST"])
 def notify_endpoint(table_id, record_id):
+    _denied = _button_auth_failed()
+    if _denied:
+        return _denied
     body = request.get_json(silent=True) or {}
     requested_by = body.get("requested_by", "")
     threading.Thread(target=handle_notify_button, args=(table_id, record_id, requested_by), daemon=True).start()
     return jsonify({"status": "accepted"})
 
 
-@app.route("/update-team/<table_id>/<record_id>", methods=["POST", "GET"])
+@app.route("/update-team/<table_id>/<record_id>", methods=["POST"])
 def update_team_endpoint(table_id, record_id):
+    _denied = _button_auth_failed()
+    if _denied:
+        return _denied
     threading.Thread(target=handle_update_team_button, args=(table_id, record_id), daemon=True).start()
     return jsonify({"status": "accepted"})
 
-@app.route("/request-update/<table_id>/<record_id>", methods=["POST", "GET"])
+@app.route("/request-update/<table_id>/<record_id>", methods=["POST"])
 def request_update_endpoint(table_id, record_id):
+    _denied = _button_auth_failed()
+    if _denied:
+        return _denied
     body = request.get_json(silent=True) or {}
     requested_by = body.get("requested_by", "")
     threading.Thread(target=handle_request_update_button, args=(table_id, record_id, requested_by), daemon=True).start()
     return jsonify({"status": "accepted"})
 
-@app.route("/review/<table_id>/<record_id>", methods=["POST", "GET"])
+@app.route("/review/<table_id>/<record_id>", methods=["POST"])
 def review_endpoint(table_id, record_id):
+    _denied = _button_auth_failed()
+    if _denied:
+        return _denied
     threading.Thread(target=handle_review_button, args=(table_id, record_id), daemon=True).start()
     return jsonify({"status": "accepted"})
 
@@ -2810,7 +2862,7 @@ def review_endpoint(table_id, record_id):
 def morning_digest():
     global _last_digest_sent
     if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "") or request.args.get("secret", "")
+        provided = request.headers.get("X-Digest-Secret", "")
         if provided != DIGEST_SECRET:
             return jsonify({"error": "Unauthorized"}), 401
     now_ts = time.time()
@@ -2849,7 +2901,7 @@ def morning_digest():
 @app.route("/message-summary", methods=["POST", "GET"])
 def message_summary_endpoint():
     if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "") or request.args.get("secret", "")
+        provided = request.headers.get("X-Digest-Secret", "")
         if provided != DIGEST_SECRET:
             return jsonify({"error": "Unauthorized"}), 401
     period = request.args.get("period", "overnight")
@@ -2863,7 +2915,7 @@ def message_summary_endpoint():
 @app.route("/check-comments", methods=["POST", "GET"])
 def check_comments_endpoint():
     if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "") or request.args.get("secret", "")
+        provided = request.headers.get("X-Digest-Secret", "")
         if provided != DIGEST_SECRET:
             return jsonify({"error": "Unauthorized"}), 401
     threading.Thread(target=check_new_comments, daemon=True).start()
@@ -2873,7 +2925,7 @@ def check_comments_endpoint():
 @app.route("/debug-fields", methods=["GET"])
 def debug_fields():
     if DIGEST_SECRET:
-        provided = request.args.get("secret", "")
+        provided = request.headers.get("X-Digest-Secret", "")
         if provided != DIGEST_SECRET:
             return jsonify({"error": "Unauthorized"}), 401
     global _projects_cache_time
@@ -2930,7 +2982,7 @@ def debug_fields():
 @app.route("/debug-artwork", methods=["GET"])
 def debug_artwork():
     if DIGEST_SECRET:
-        provided = request.args.get("secret", "")
+        provided = request.headers.get("X-Digest-Secret", "")
         if provided != DIGEST_SECRET:
             return jsonify({"error": "Unauthorized"}), 401
     global _projects_cache_time
@@ -3008,54 +3060,9 @@ def seed_qa():
     return jsonify({"status": "ok", "scope": scope, "stored": stored,
                     "skipped": skipped, "errors": errors[:10]})
 
-@app.route("/test-google-briefing", methods=["GET"])
-def test_google_briefing():
-    """Temporary test endpoint for Google Calendar & Gmail briefing."""
-    try:
-        _scheduled_google_morning_briefing()
-        return jsonify({"status": "ok", "message": "Morning briefing sent"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({"code": 0, "bot": "Iron Bot v4.12", "features": ["notify", "update-team", "digest", "due-alerts", "comment-alerts", "ai-chat", "message-summaries-v2"]})
-
-@app.route("/diag-google", methods=["GET"])
-def diag_google():
-    """Diagnostic: test Google API connection and return raw results."""
-    import traceback
-    result = {"creds_env_set": bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT_CREDENTIALS", "")),
-              "delegated_user": os.environ.get("GOOGLE_DELEGATED_USER", "NOT SET")}
-    # Test credentials
-    try:
-        from google_client import _get_credentials
-        creds = _get_credentials()
-        result["creds_ok"] = creds is not None
-    except Exception as e:
-        result["creds_error"] = traceback.format_exc()
-    # Test calendar
-    try:
-        meetings = get_todays_meetings()
-        result["meetings_count"] = len(meetings)
-        result["meetings"] = meetings
-    except Exception as e:
-        result["calendar_error"] = traceback.format_exc()
-    # Test gmail
-    try:
-        emails = get_recent_emails(hours_back=14)
-        result["emails_count"] = len(emails)
-        result["email_subjects"] = [e.get("subject", "") for e in emails[:5]]
-    except Exception as e:
-        result["gmail_error"] = traceback.format_exc()
-    return jsonify(result)
-
-
-# =========================================================================
-# STARTUP â guarded to prevent double-init
-# =========================================================================
 
 def _scheduled_google_morning_briefing():
     """8 AM ET: Calendar + important emails briefing to Founders channel."""
