@@ -2861,10 +2861,8 @@ def review_endpoint(table_id, record_id):
 @app.route("/morning-digest", methods=["POST", "GET"])
 def morning_digest():
     global _last_digest_sent
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
+    if not _header_secret_ok("X-Digest-Secret", DIGEST_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
     now_ts = time.time()
     if now_ts - _last_digest_sent < 3600:
         logger.info(f"HTTP /morning-digest: Already sent {int(now_ts - _last_digest_sent)}s ago, skipping duplicate")
@@ -2900,10 +2898,8 @@ def morning_digest():
 
 @app.route("/message-summary", methods=["POST", "GET"])
 def message_summary_endpoint():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
+    if not _header_secret_ok("X-Digest-Secret", DIGEST_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
     period = request.args.get("period", "overnight")
     if period not in ("overnight", "midday"):
         return jsonify({"error": "period must be 'overnight' or 'midday'"}), 400
@@ -2914,20 +2910,16 @@ def message_summary_endpoint():
 
 @app.route("/check-comments", methods=["POST", "GET"])
 def check_comments_endpoint():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
+    if not _header_secret_ok("X-Digest-Secret", DIGEST_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
     threading.Thread(target=check_new_comments, daemon=True).start()
     return jsonify({"status": "started"})
 
 
 @app.route("/debug-fields", methods=["GET"])
 def debug_fields():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
+    if not _header_secret_ok("X-Digest-Secret", DIGEST_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
     global _projects_cache_time
     _projects_cache_time = 0
     projects = fetch_all_projects()
@@ -2981,10 +2973,8 @@ def debug_fields():
 
 @app.route("/debug-artwork", methods=["GET"])
 def debug_artwork():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
+    if not _header_secret_ok("X-Digest-Secret", DIGEST_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
     global _projects_cache_time
     _projects_cache_time = 0
     projects = fetch_all_projects()
@@ -3032,8 +3022,8 @@ def seed_qa():
     if not SEED_TOKEN:
         return jsonify({"status": "disabled", "message": "SEED_TOKEN not set"}), 503
     body = request.get_json(silent=True) or {}
-    token = (request.headers.get("X-Seed-Token", "") or body.get("token", "")).strip()
-    if token != SEED_TOKEN:
+    token = request.headers.get("X-Seed-Token", "").strip()
+    if not _hmac.compare_digest(token, SEED_TOKEN):
         return jsonify({"status": "unauthorized"}), 401
     scope = (body.get("scope") or "global").strip()
     items = body.get("items") or []
