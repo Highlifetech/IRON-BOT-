@@ -837,6 +837,15 @@ def register(app):
         app.logger.error('NetSuite PO sync disabled: setup failed')
         po_sync = None
 
+    # Re-apply POs that changed in NetSuite while Iron Bot was down or restarting
+    # (NetSuite does not retry a push that failed).
+    if not allow_short_key:
+        try:
+            from netsuite_po_catchup import start_from_env as start_catchup
+            start_catchup(cards)
+        except Exception:
+            app.logger.error('NetSuite PO catch-up disabled: setup failed')
+
     # Board discovery: any table in the catalog Base that carries the NetSuite
     # sync fields becomes a board without editing OM_CARD_PUSH_BOARDS. Needs the
     # review extension, because every board must also have review config.
