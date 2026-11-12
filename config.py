@@ -139,7 +139,7 @@ NOTIFICATION_CHATS = [
 # =============================================================================
 LARK_PRIMARY_CALENDAR_ID = os.environ.get("LARK_PRIMARY_CALENDAR_ID", "")
 LARK_CHAT_ID_DIGEST = os.environ.get("LARK_CHAT_ID_DIGEST", "")
-DIGEST_SECRET = os.environ.get("DIGEST_SECRET", "")
+# DIGEST_SECRET removed: the routes it protected no longer exist.
 
 # =============================================================================
 # BOARDS TO EXCLUDE FROM DIGEST (exact match, case-insensitive)

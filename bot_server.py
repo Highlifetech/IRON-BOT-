@@ -41,7 +41,7 @@ from config import (
     FIELD_DUE_DATE, FIELD_PRODUCTION_ARTWORK, FIELD_ASSIGNED_TO,
     FIELD_CLIENT_EMAIL,
     SKIP_STATUSES, DIGEST_EXCLUDED_BOARDS,
-    LARK_CHAT_ID_DIGEST, DIGEST_SECRET,
+    LARK_CHAT_ID_DIGEST,
     LARK_VERIFICATION_TOKEN, CARD_CALLBACK_VERIFICATION_TOKEN,
     ALL_ORDERS_VIEW_KEYWORD,
     ALT_ORDER_NUM_FIELDS, ALT_CLIENT_FIELDS, ALT_STATUS_FIELDS, ALT_DUE_DATE_FIELDS,
@@ -2858,160 +2858,9 @@ def review_endpoint(table_id, record_id):
     return jsonify({"status": "accepted"})
 
 
-@app.route("/morning-digest", methods=["POST", "GET"])
-def morning_digest():
-    global _last_digest_sent
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
-    now_ts = time.time()
-    if now_ts - _last_digest_sent < 3600:
-        logger.info(f"HTTP /morning-digest: Already sent {int(now_ts - _last_digest_sent)}s ago, skipping duplicate")
-        return jsonify({"status": "skipped", "reason": "digest already sent within the last hour"}), 200
-    _last_digest_sent = now_ts
-    chat_id = DIGEST_CHAT or FOUNDERS_CHAT
-    if not chat_id:
-        return jsonify({"error": "No digest channel configured"}), 500
-    try:
-        global _projects_cache_time
-        _projects_cache_time = 0
-        projects = fetch_all_projects()
-        if not projects:
-            return jsonify({"error": "No data"}), 500
-        digest = build_morning_digest(projects)
-        now_str = _est_now().strftime("%A, %B %d, %Y")
-        total = len(projects)
-        card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": f"\ud83c\udf05 IRON BOT MORNING BRIEFING"}, "template": "blue"}, "elements": [{"tag": "markdown", "content": f"**{now_str}** | HLT Active Projects: **{total}**\n---"}, {"tag": "markdown", "content": digest}]}
-        lark.send_card(card, chat_id=chat_id)
-        send_due_date_alerts()
-
-        # Also send overnight message summary with the digest
-        try:
-            send_message_summary(period="overnight")
-        except Exception as e:
-            logger.error(f"Digest overnight summary error: {e}")
-
-        return jsonify({"status": "ok", "records": total})
-    except Exception as e:
-        logger.error(f"Digest error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/message-summary", methods=["POST", "GET"])
-def message_summary_endpoint():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
-    period = request.args.get("period", "overnight")
-    if period not in ("overnight", "midday"):
-        return jsonify({"error": "period must be 'overnight' or 'midday'"}), 400
-    digest_only = request.args.get("digest_only", "").lower() in ("true", "1", "yes")
-    result = send_message_summary(period=period, digest_only=digest_only)
-    return jsonify(result)
-
-
-@app.route("/check-comments", methods=["POST", "GET"])
-def check_comments_endpoint():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
-    threading.Thread(target=check_new_comments, daemon=True).start()
-    return jsonify({"status": "started"})
-
-
-@app.route("/debug-fields", methods=["GET"])
-def debug_fields():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
-    global _projects_cache_time
-    _projects_cache_time = 0
-    projects = fetch_all_projects()
-    if not projects:
-        return jsonify({"error": "No projects"})
-    field_names_all = set()
-    for p in projects[:50]:
-        for k in p.keys():
-            if not k.startswith("__"):
-                field_names_all.add(k)
-    raw_samples = []
-    for p in projects[:15]:
-        tname = p.get("__table_name__", "")
-        if _is_excluded_board(tname):
-            continue
-        sample = {"__table__": tname}
-        for fname in [FIELD_ORDER_NUM, FIELD_STATUS, FIELD_CLIENT, FIELD_DUE_DATE]:
-            raw = p.get(fname)
-            sample["RAW_" + fname] = str(type(raw).__name__) + "|" + repr(raw)[:200] if raw is not None else "MISSING"
-        sample["parsed_order"] = get_order_num(p)
-        sample["parsed_status"] = get_status(p)
-        sample["parsed_client"] = get_client_name(p)
-        sample["parsed_due"] = str(get_due_date_raw(p))[:100]
-        raw_samples.append(sample)
-        if len(raw_samples) >= 3:
-            break
-    seen = set()
-    skip_no_order = 0
-    skip_no_status = 0
-    has_order = 0
-    has_status = 0
-    status_vals = {}
-    for p in projects:
-        on = get_order_num(p)
-        if not on:
-            skip_no_order += 1
-            continue
-        if on in seen:
-            continue
-        seen.add(on)
-        has_order += 1
-        st = get_status(p)
-        if not st:
-            skip_no_status += 1
-        else:
-            has_status += 1
-            status_vals[st] = status_vals.get(st, 0) + 1
-    return jsonify({"total": len(projects), "field_names": sorted(list(field_names_all)), "config": {"ORDER": FIELD_ORDER_NUM, "STATUS": FIELD_STATUS, "CLIENT": FIELD_CLIENT, "DUE": FIELD_DUE_DATE}, "raw_samples": raw_samples, "digest_sim": {"unique_with_order": has_order, "skip_no_order": skip_no_order, "skip_no_status": skip_no_status, "has_status": has_status, "top_statuses": dict(sorted(status_vals.items(), key=lambda x: -x[1])[:15])}})
-
-
-
-@app.route("/debug-artwork", methods=["GET"])
-def debug_artwork():
-    if DIGEST_SECRET:
-        provided = request.headers.get("X-Digest-Secret", "")
-        if provided != DIGEST_SECRET:
-            return jsonify({"error": "Unauthorized"}), 401
-    global _projects_cache_time
-    _projects_cache_time = 0
-    projects = fetch_all_projects()
-    if not projects:
-        return jsonify({"error": "No projects"})
-    seen = set()
-    artwork_projects = []
-    for p in projects:
-        order_num = get_order_num(p)
-        if not order_num or order_num in seen:
-            continue
-        seen.add(order_num)
-        status = get_status(p)
-        if not status:
-            continue
-        status_upper = status.upper()
-        if status_upper == "PENDING ARTWORK":
-            artwork_projects.append({
-                "order": order_num,
-                "status_raw": status,
-                "status_upper": status_upper,
-                "client": get_client_name(p),
-                "board": p.get("__table_name__", ""),
-                "table_id": p.get("__table_id__", ""),
-                "record_id": p.get("__record_id__", "")
-            })
-    return jsonify({"total_records": len(projects), "pending_artwork_count": len(artwork_projects), "projects": artwork_projects})
+# The digest, message-summary, comment-check and debug routes were removed:
+# they were only ever called manually and exposed internal data on a public URL.
+# Scheduled jobs call the underlying functions directly.
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -3032,8 +2881,8 @@ def seed_qa():
     if not SEED_TOKEN:
         return jsonify({"status": "disabled", "message": "SEED_TOKEN not set"}), 503
     body = request.get_json(silent=True) or {}
-    token = (request.headers.get("X-Seed-Token", "") or body.get("token", "")).strip()
-    if token != SEED_TOKEN:
+    token = request.headers.get("X-Seed-Token", "").strip()
+    if not _hmac.compare_digest(token, SEED_TOKEN):
         return jsonify({"status": "unauthorized"}), 401
     scope = (body.get("scope") or "global").strip()
     items = body.get("items") or []
