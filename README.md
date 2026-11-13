@@ -1,4 +1,4 @@
-# 📋 HLT Urgent Project Tracker Bot
+# 📋 Off Menu Urgent Project Tracker Bot
 
 Automatically reads project records from your Lark Base, checks due dates,
 and sends warning notifications to your team group chat at:
@@ -25,7 +25,7 @@ Projects marked as **"Shipped"** are automatically skipped.
 ## Bot Message Example
 
 ```
-📋 HLT Project Due Date Reminder
+📋 Off Menu Project Due Date Reminder
 Wednesday, February 25 2026
 
 🔴 Due in 1 week (2 projects)

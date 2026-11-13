@@ -1,5 +1,5 @@
 """
-HLT Inbound Shipment Summary
+Off Menu Inbound Shipment Summary
 
 Posts one short summary of open shipments into the HLT INBOUND DELIVERIES
 chat, and flags anything that needs a person.

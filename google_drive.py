@@ -27,7 +27,7 @@ DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 # Reuse the same service-account env the rest of the bot already uses.
 GOOGLE_SERVICE_ACCOUNT_CREDENTIALS = os.environ.get("GOOGLE_SERVICE_ACCOUNT_CREDENTIALS", "")
-GOOGLE_DELEGATED_USER = os.environ.get("GOOGLE_DELEGATED_USER", "brendan@highlifetech.co")
+GOOGLE_DELEGATED_USER = os.environ.get("GOOGLE_DELEGATED_USER", "brendan@byoffmenu.com")
 
 # Export formats for native Google file types.
 _EXPORT_MIME = {

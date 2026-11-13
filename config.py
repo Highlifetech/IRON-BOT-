@@ -1,5 +1,5 @@
 """
-Configuration for HLT Iron Bot
+Configuration for Off Menu Iron Bot
 All settings loaded from environment variables (Railway / GitHub Secrets)
 """
 import os
