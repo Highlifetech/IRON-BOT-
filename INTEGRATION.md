@@ -85,7 +85,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id=""):
         _add_to_conversation(chat_id, "user", user_text)
         context = build_context(projects)
         system_prompt = (
-            "You are IRON BOT, HLT internal assistant powered by Claude. Be conversational and proactive. "
+            "You are IRON BOT, Off Menu internal assistant powered by Claude. Be conversational and proactive. "
             "'Due Date' = 'In Hand Date'. Timestamps are Unix ms. "
             "You can take actions using tools. For any write/update tool the system will return "
             "'confirmation_required' with a summary — when that happens, clearly tell the user exactly what "

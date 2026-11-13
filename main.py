@@ -84,7 +84,7 @@ def route_chat_ids(table_name: str) -> list:
 
 def build_warning_message(warnings: dict) -> str:
     """Build the warning message text."""
-    lines = ["**HLT Project Due Date Tracker**"]
+    lines = ["**Off Menu Project Due Date Tracker**"]
     color = {21: "3 weeks", 14: "2 weeks", 7: "1 week"}
 
     for threshold in sorted(warnings.keys(), reverse=True):

@@ -52,7 +52,7 @@ MAX_MESSAGES_PER_CHAT = int(os.environ.get("RAG_MAX_MESSAGES_PER_CHAT", "1500"))
 MAX_ATTACHMENT_MB = int(os.environ.get("RAG_MAX_ATTACHMENT_MB", "20"))
 
 # Lark tenant domain for building human-readable citation URLs.
-LARK_TENANT_DOMAIN = os.environ.get("LARK_TENANT_DOMAIN", "")  # e.g. "hlt.larksuite.com"
+LARK_TENANT_DOMAIN = os.environ.get("LARK_TENANT_DOMAIN", "")  # e.g. "off-menu.jp.larksuite.com"
 
 
 def resolve_provider():

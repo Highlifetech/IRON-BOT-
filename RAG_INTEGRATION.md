@@ -81,7 +81,7 @@ One embeddings key (Voyage recommended — Anthropic's partner; OpenAI also fine
 | Secret | Value |
 |---|---|
 | `VOYAGE_API_KEY` *or* `OPENAI_API_KEY` | your embeddings key |
-| `LARK_TENANT_DOMAIN` | e.g. `hlt.larksuite.com` (for citation links) |
+| `LARK_TENANT_DOMAIN` | e.g. `off-menu.jp.larksuite.com` (for citation links) |
 
 The Lark secrets (`LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_BASE_URL`,
 `LARK_BASE_APP_TOKEN`) are already set for the other workflows.

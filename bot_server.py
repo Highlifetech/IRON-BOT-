@@ -1361,8 +1361,8 @@ def build_morning_digest(projects):
         hannah_summary = _person_summary("Hannah", person_projects.get("Hannah", []))
         lucy_summary = _person_summary("Lucy", person_projects.get("Lucy", []))
         summary_data = f"Overdue: {len(overdue)}, Due 7d: {len(due_7)}, Due 14d: {len(due_14)}, Waiting Art: {len(waiting_art)}\nBrendan: {brendan_summary}\nHannah: {hannah_summary}\nLucy: {lucy_summary}"
-        prompt = f"Write a brief daily focus summary for the HLT production team. Address what Brendan, Hannah, and Lucy each need to focus on today. Flag anything urgent. Be direct, 3-5 sentences.\n\n{summary_data}"
-        resp = anthropic_client.messages.create(model="claude-sonnet-4-6", max_tokens=600, system="You are Iron Bot, HLT's production assistant.", messages=[{"role": "user", "content": prompt}])
+        prompt = f"Write a brief daily focus summary for the Off Menu production team. Address what Brendan, Hannah, and Lucy each need to focus on today. Flag anything urgent. Be direct, 3-5 sentences.\n\n{summary_data}"
+        resp = anthropic_client.messages.create(model="claude-sonnet-4-6", max_tokens=600, system="You are Iron Bot, Off Menu's production assistant.", messages=[{"role": "user", "content": prompt}])
         digest += f"\n\n**\ud83d\udcdd Daily Focus**\n{resp.content[0].text.strip()}"
     except Exception as e:
         logger.error(f"AI summary error: {e}")
@@ -1561,7 +1561,7 @@ def _summarize_messages_with_ai(all_channel_msgs, period_label, projects_context
     if len(transcript) > 30000:
         transcript = transcript[:30000] + "\n... [truncated]"
 
-    prompt = f"""Here are messages from HLT team channels ({period_label}).
+    prompt = f"""Here are messages from Off Menu team channels ({period_label}).
 
 {transcript}
 
@@ -1598,7 +1598,7 @@ RULES:
         resp = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=3000,
-            system="You are Iron Bot, HLT's production assistant. You summarize team messages across all channels and extract actionable items for Brendan, the founder. Be direct, concise, and prioritize what matters. HLT is a custom promotional products / manufacturing company.",
+            system="You are Iron Bot, Off Menu's production assistant. You summarize team messages across all channels and extract actionable items for Brendan, the founder. Be direct, concise, and prioritize what matters. Off Menu is a custom promotional products / manufacturing company.",
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.content[0].text.strip()
@@ -2239,7 +2239,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id="", image_b6
         if qa_ctx:
             context = qa_ctx + "\n\n" + context
         system_prompt = (
-            "You are Iron Bot, High Life Tech's in-house AI assistant. You are a genuinely capable, "
+            "You are Iron Bot, Off Menu's in-house AI assistant. You are a genuinely capable, "
             "high-end conversational assistant \u2014 think of yourself as Claude or Gemini working inside the "
             "company's chat. Be warm, sharp, and genuinely helpful.\n\n"
             "STYLE: Talk like a thoughtful colleague \u2014 flowing, connected sentences in short paragraphs, never "
@@ -2250,7 +2250,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id="", image_b6
             "Vary your rhythm so it sounds human. It should read like a normal Claude/ChatGPT reply, not a status report.\n\n"
             "SCOPE: You're a full assistant, not just a data lookup. Answer ANY question well \u2014 general knowledge, "
             "writing, analysis, advice, brainstorming, math \u2014 exactly as a top assistant would, even when it has "
-            "nothing to do with HLT. When a question IS about the company, ground your answer in the HLT data and "
+            "nothing to do with Off Menu. When a question IS about the company, ground your answer in the Off Menu data and "
             "tools available to you. Relevant company context, past answers, and live records are provided below; "
             "use them when they help and ignore them when they don't. Follow the conversation naturally and refer "
             "back to what was said earlier. If a request is genuinely ambiguous, ask one brief clarifying question "
@@ -3049,7 +3049,7 @@ def _scheduled_combined_morning_briefing():
         total = len(projects)
 
         elements = [
-            {"tag": "markdown", "content": f"**{now_str}** | HLT Active Projects: **{total}**\n---"},
+            {"tag": "markdown", "content": f"**{now_str}** | Off Menu Active Projects: **{total}**\n---"},
             {"tag": "markdown", "content": digest},
         ]
 

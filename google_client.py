@@ -24,7 +24,7 @@ GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 ALL_SCOPES = CALENDAR_SCOPES + GMAIL_SCOPES
 
 GOOGLE_SERVICE_ACCOUNT_CREDENTIALS = os.environ.get("GOOGLE_SERVICE_ACCOUNT_CREDENTIALS", "")
-GOOGLE_DELEGATED_USER = os.environ.get("GOOGLE_DELEGATED_USER", "brendan@highlifetech.co")
+GOOGLE_DELEGATED_USER = os.environ.get("GOOGLE_DELEGATED_USER", "brendan@byoffmenu.com")
 
 
 def _get_credentials():
@@ -186,7 +186,7 @@ def filter_important_emails(emails, anthropic_client=None):
             messages=[{
                 "role": "user",
                 "content": (
-                    "You are an executive assistant for a promotional products company (Highlifetech/HLT). "
+                    "You are an executive assistant for a promotional products company (Highlifetech/Off Menu). "
                     "Review these emails and identify which ones are important or project-related.\n\n"
                     "Important = client emails, order updates, production issues, shipping, quotes, invoices, "
                     "vendor communications, urgent requests.\n"
