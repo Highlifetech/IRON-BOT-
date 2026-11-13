@@ -28,6 +28,32 @@ log = logging.getLogger(__name__)
 STATUS_FIELD = 'Status'
 STARTING_STATUS = 'Pending Artwork'
 
+# What the sender chose to put on the card, per line (NetSuite "Send POs to Lark").
+# address: auto = PO ship-to, else SO ship-to (the old behaviour)
+#          so / po = only that address; om = Off Menu's own address; none = no address
+ADDRESS_CHOICES = ('auto', 'so', 'po', 'om', 'none')
+PUSH_DEFAULTS = {'address': 'auto', 'sizes': True, 'description': True, 'units': True}
+OM_SHIP_TO_DEFAULT = 'Off Menu\n3495 N Dixie Highway\nBoca Raton, FL 33431'
+
+
+def om_ship_to():
+    return (os.environ.get('OM_SHIP_TO_ADDRESS') or OM_SHIP_TO_DEFAULT).replace('\\n', '\n').strip()
+
+
+def push_options(line):
+    """The sender's per-line choices, with defaults for older sender pages."""
+    raw = line.get('push')
+    if raw is None:
+        return dict(PUSH_DEFAULTS)
+    if not isinstance(raw, dict) or not set(raw) <= set(PUSH_DEFAULTS):
+        raise PushError('INVALID_PUSH_OPTIONS')
+    opts = dict(PUSH_DEFAULTS, **raw)
+    if opts['address'] not in ADDRESS_CHOICES:
+        raise PushError('INVALID_PUSH_OPTIONS')
+    if any(not isinstance(opts[k], bool) for k in ('sizes', 'description', 'units')):
+        raise PushError('INVALID_PUSH_OPTIONS')
+    return opts
+
 
 class PushError(Exception):
     pass
@@ -73,6 +99,17 @@ def validate_so_ship_to(line):
     return value
 
 
+def address_status(line):
+    choice = push_options(line)['address']
+    if choice == 'none':
+        return 'No address (as chosen)'
+    if choice == 'om':
+        return 'Off Menu address'
+    if choice == 'po':
+        return 'PO ship-to address (if the PO has one)'
+    return so_address_status(line)
+
+
 def so_address_status(line):
     value = validate_so_ship_to(line)
     if value is None: return 'Address not included by sender'
@@ -112,6 +149,7 @@ def validate_payload(payload, boards, account):
             if field in line and line[field] is not None and (not isinstance(line[field], str) or len(line[field]) > 20000):
                 raise PushError('INVALID_TEXT')
         validate_so_ship_to(line)
+        push_options(line)
         if not line['product'].strip():
             raise PushError('MISSING_PRODUCT')
     return lines
@@ -404,42 +442,24 @@ class LarkCards:
         master = self.master(board, line, allow_add=True)
         f = b['fields']
         name, description = starting_name_and_description(line)
-        fields = {f['identity']: line['identity'],
-                  f['description']: description, f['quantity']: line['quantity'],
-                  f['po_relation']: [master['record_id']], f['units']: (line.get('units') or '').strip() or 'Each'}
+        opts = push_options(line)
+        fields = {f['identity']: line['identity'], f['quantity']: line['quantity'],
+                  f['po_relation']: [master['record_id']]}
+        if opts['description']:
+            fields[f['description']] = description
+        if opts['units']:
+            fields[f['units']] = (line.get('units') or '').strip() or 'Each'
         if name:
             fields[self.product_field(board)] = name
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
         if f.get('po_link') and f['po_link'] != f['po_relation'] and self.has_field(board, f['po_link']):
             fields[f['po_link']] = [master['record_id']]
         # Starting values for discovered boards (e.g. Status = Pending Artwork).
-        for name, value in (b.get('initial_fields') or {}).items():
-            fields.setdefault(name, value)
-        ship_to = validate_so_ship_to(line)
+        for key, value in (b.get('initial_fields') or {}).items():
+            fields.setdefault(key, value)
         cfg = self.address_config.get(board)
-        # Prefer the Master PO List address (PO ship-to, else SO ship-to, from the PO sync).
-        po_address = ''
-        master_fields = master.get('fields', {}) if isinstance(master, dict) else {}
-        raw = master_fields.get('Ship To Address')
-        if isinstance(raw, list):
-            raw = ''.join(str(v.get('text', '')) for v in raw if isinstance(v, dict))
-        if isinstance(raw, str) and raw.strip() and cfg:
-            po_address = raw.strip()[:10000]
-            account = line['account']
-            if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
-            fields.update({cfg['address']: po_address,
-                           cfg['source']: {'text': line['poNumber'] + ' — Ship To',
-                             'link': f"https://{account.lower().replace('_','-')}.app.netsuite.com/app/accounting/transactions/purchord.nl?id={line['poId']}"},
-                           cfg['copied_at']: int(time.time()*1000)})
-        if not po_address and ship_to and ship_to['status']=='AVAILABLE' and cfg:
-            # A board without address fields still gets its card; the address
-            # is on the Master PO List row either way.
-            account = line['account']
-            if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?',account): raise PushError('INVALID_ACCOUNT')
-            fields.update({cfg['address']:ship_to['address'],
-                           cfg['source']:{'text':ship_to['soNumber']+' — Ship To',
-                             'link':f"https://{account.lower().replace('_','-')}.app.netsuite.com/app/accounting/transactions/salesord.nl?id={ship_to['soId']}"},
-                           cfg['copied_at']:int(time.time()*1000)})
+        if cfg:
+            fields.update(self.address_fields(cfg, line, master, opts['address']))
         # SO/customer/vendor are lookups through the existing master relation.
         # No write to production stage, shipments, approval, artwork or dates.
         result = self._create_card(board, b, fields)
@@ -455,8 +475,40 @@ class LarkCards:
                                                  {STATUS_FIELD: STARTING_STATUS}, app_token=b['base'])
             except Exception:
                 log.info('Starting status not set on %s %s', board, result['record_id'])
-        result['sizes'] = self.add_sizes(board, result['record_id'], line)
+        result['sizes'] = self.add_sizes(board, result['record_id'], line) if opts['sizes'] else ''
         return result
+
+    def address_fields(self, cfg, line, master, choice):
+        """Address columns for a new card, following the sender's choice."""
+        if choice == 'none':
+            return {}
+        account = line['account']
+        if not re.fullmatch(r'[0-9]+(?:_SB[0-9]+)?', account):
+            raise PushError('INVALID_ACCOUNT')
+        host = f"https://{account.lower().replace('_', '-')}.app.netsuite.com/app/accounting/transactions/"
+        po_link = host + f"purchord.nl?id={line['poId']}"
+        stamp = int(time.time() * 1000)
+        if choice == 'om':
+            return {cfg['address']: om_ship_to(), cfg['source']: {'text': 'Off Menu', 'link': po_link},
+                    cfg['copied_at']: stamp}
+        if choice in ('auto', 'po'):
+            # The Master PO List row holds the PO ship-to (else SO ship-to) from the PO sync.
+            raw = (master.get('fields', {}) if isinstance(master, dict) else {}).get('Ship To Address')
+            if isinstance(raw, list):
+                raw = ''.join(str(v.get('text', '')) for v in raw if isinstance(v, dict))
+            if isinstance(raw, str) and raw.strip():
+                return {cfg['address']: raw.strip()[:10000],
+                        cfg['source']: {'text': line['poNumber'] + ' — Ship To', 'link': po_link},
+                        cfg['copied_at']: stamp}
+            if choice == 'po':
+                return {}
+        ship_to = validate_so_ship_to(line)
+        if ship_to and ship_to['status'] == 'AVAILABLE':
+            return {cfg['address']: ship_to['address'],
+                    cfg['source']: {'text': ship_to['soNumber'] + ' — Ship To',
+                                    'link': host + f"salesord.nl?id={ship_to['soId']}"},
+                    cfg['copied_at']: stamp}
+        return {}
 
     def _create_card(self, board, b, fields):
         try:
@@ -571,7 +623,7 @@ def process(line, ledger, cards):
         ledger.release(key)  # Lark refused it, so nothing exists: a resend may try again.
         raise
     ledger.complete(key, result['record_id'])
-    out = {'identity': key, 'status': 'Created', 'addressStatus':so_address_status(line), 'url': cards.url(board, result['record_id'])}
+    out = {'identity': key, 'status': 'Created', 'addressStatus': address_status(line), 'url': cards.url(board, result['record_id'])}
     if result.get('sizes'):
         out['sizesStatus'] = result['sizes']
     return out

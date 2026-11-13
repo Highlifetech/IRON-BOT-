@@ -121,6 +121,40 @@ class CardAddressFromMasterTests(unittest.TestCase):
         self.assertEqual(lark.cards[0]['Address'],'PO ship-to\nCity')
         self.assertIn('PO-EXAMPLE-1',lark.cards[0]['Address source']['text'])
 
+class SendChoiceTests(unittest.TestCase):
+    """Per-line choices from the NetSuite Send to Lark page."""
+    def make(self, push, so_ship=None):
+        lark=FakeLark();cards=LarkCards(lark,BOARDS,CATALOG)
+        cards.address_config={'test':{'address':'Address','source':'Address source','copied_at':'Copied'}}
+        lark.master.append({'record_id':'recM','fields':{'NetSuite PO ID':'10001','PO':'PO-EXAMPLE-1','NetSuite Supplier ID':'126','Sales Order':'SO-EXAMPLE-1','Customer':'Customer','Ship To Address':'PO ship-to\nCity'}})
+        line=dict(LINE,push=push)
+        if so_ship: line.update(so_ship)
+        cards.create('test',line)
+        return lark.cards[0]
+    def test_no_address(self):
+        card=self.make({'address':'none'})
+        self.assertNotIn('Address',card)
+    def test_off_menu_address(self):
+        card=self.make({'address':'om'})
+        self.assertIn('3495 N Dixie Highway',card['Address'])
+        self.assertEqual(card['Address source']['text'],'Off Menu')
+    def test_po_address(self):
+        self.assertEqual(self.make({'address':'po'})['Address'],'PO ship-to\nCity')
+    def test_so_address_skips_po_ship_to(self):
+        so={'soId':'5','soNumber':'SO-EXAMPLE-1','soShipTo':{'soId':'5','soNumber':'SO-EXAMPLE-1','status':'AVAILABLE','address':'Client\nTown'}}
+        card=self.make({'address':'so'},so)
+        self.assertEqual(card['Address'],'Client\nTown')
+    def test_fields_switched_off(self):
+        card=self.make({'description':False,'units':False,'sizes':False})
+        f=BOARDS['test']['fields']
+        self.assertNotIn(f['description'],card)
+        self.assertNotIn(f['units'],card)
+    def test_bad_choice_rejected(self):
+        from netsuite_card_push import push_options, PushError
+        for bad in [{'address':'mars'},{'sizes':'yes'},{'colour':True},'all']:
+            with self.assertRaises(PushError): push_options({'push':bad})
+        self.assertEqual(push_options({})['address'],'auto')
+
 class InstantPOHeaderTests(unittest.TestCase):
     def payload(self,**po):
         base={'poId':'37358','poNumber':'PO6975','vendorId':'126','vendor':'Hannah','soNumber':'SO6889','customer':'Psychotic','shipTo':'Robert Johnson\nGlendora CA'}
