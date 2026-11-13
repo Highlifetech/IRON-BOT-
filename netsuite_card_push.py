@@ -504,14 +504,20 @@ class LarkCards:
         color = (line.get('variant') or '').strip()
         made = 0
         for size, qty in rows:
+            # "Variant" is an editable text field (formerly a formula): seed it from
+            # the NetSuite variant/size ("Color - Size"); the team can edit it after.
+            label = ' - '.join(p for p in (color, str(size or '').strip()) if p)
             fields = {v['size']: size, v['quantity']: qty, v['parent']: [record_id]}
             try:
-                self.client.create_record(v['table'], dict(fields, **({'Color': color} if color else {})), app_token=base)
+                self.client.create_record(v['table'], dict(fields, **({'Color': color} if color else {}), **({'Variant': label} if label else {})), app_token=base)
             except Exception:
                 try:
-                    self.client.create_record(v['table'], fields, app_token=base)
+                    self.client.create_record(v['table'], dict(fields, **({'Variant': label} if label else {})), app_token=base)
                 except Exception:
-                    continue
+                    try:
+                        self.client.create_record(v['table'], fields, app_token=base)
+                    except Exception:
+                        continue
             made += 1
         note = f'{made} size rows added'
         total = sum(q for _, q in rows)
