@@ -133,6 +133,29 @@ class CreateFieldsTests(unittest.TestCase):
         self.assertEqual(Client.created['PO'], ['recMaster'])
         self.assertEqual(Client.created['Status'], 'Pending Artwork')
 
+    def test_removed_po_link_is_not_written(self):
+        from netsuite_card_push import LarkCards
+        line = {'identity': '1:purchaseorder:5:9', 'account': '1', 'poId': '5', 'poNumber': 'PO5', 'vendorId': '7',
+                'soNumber': 'SO5', 'product': 'Hat', 'description': 'Black', 'quantity': 2, 'units': 'Each'}
+        class Client:
+            created = None
+            def _post(self, path, body=None, params=None):
+                return {'code': 0, 'data': {'items': [{'record_id': 'recMaster', 'fields': {
+                    'NetSuite PO ID': '5', 'PO': 'PO5', 'NetSuite Supplier ID': '7', 'Sales Order': 'SO5'}}], 'has_more': False}}
+            def list_fields(self, table, app_token=None):
+                return [{'field_name': n} for n in ('NetSuite product line ID', 'Product Name', 'Product Description',
+                                                    'Ordered Quantity', 'Select PO', 'Unit', 'Status')]
+            def create_record(self, table, fields, app_token=None):
+                Client.created = fields
+                return {'record_id': 'recNew'}
+        board = {'base': BASE, 'table': 'tblNew', 'initial_fields': {'Status': 'Pending Artwork'},
+                 'fields': {'identity': 'NetSuite product line ID', 'product': 'Product Name', 'description': 'Product Description',
+                            'quantity': 'Ordered Quantity', 'po_relation': 'Select PO', 'po_link': 'PO', 'units': 'Unit'}}
+        cards = LarkCards(Client(), {'tblNew': board}, {'base': BASE, 'table': CATALOG, 'po_id_field': 'NetSuite PO ID'})
+        cards.create('tblNew', line)
+        self.assertEqual(Client.created['Select PO'], ['recMaster'])
+        self.assertNotIn('PO', Client.created)
+
 
 if __name__ == '__main__':
     unittest.main()

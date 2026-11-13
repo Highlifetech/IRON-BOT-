@@ -273,6 +273,16 @@ class LarkCards:
         self._catalog_added = {}
         self._product_field = {}
 
+    def has_field(self, board, name):
+        """False only when Lark's field list for the board is readable and lacks
+        the column. Used for optional columns that may be removed from a board."""
+        b = self.boards[board]
+        try:
+            names = {x.get('field_name') for x in (self.client.list_fields(b['table'], app_token=b['base']) or [])}
+        except Exception:
+            return True
+        return not names or name in names
+
     def product_field(self, board):
         """Card title column. Renamed in Lark from "Products" to "Product Name";
         accept either so the rename can happen board by board without downtime."""
@@ -400,7 +410,7 @@ class LarkCards:
         if name:
             fields[self.product_field(board)] = name
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
-        if f.get('po_link') and f['po_link'] != f['po_relation']:
+        if f.get('po_link') and f['po_link'] != f['po_relation'] and self.has_field(board, f['po_link']):
             fields[f['po_link']] = [master['record_id']]
         # Starting values for discovered boards (e.g. Status = Pending Artwork).
         for name, value in (b.get('initial_fields') or {}).items():
