@@ -291,6 +291,14 @@ def reconcile_configured_boards(client, catalog, boards, review_config=None, add
             if live.get(name) != pick:
                 done.append(f'{name}: {live.get(name)} -> {pick}')
                 live[name] = pick
+        # The older "PO" link was removed from the boards (cards now use
+        # "Select PO" only). Writing a column that no longer exists makes Lark
+        # refuse the whole card, so stop writing it once it is gone.
+        old_link = live.get('po_link')
+        if old_link and old_link != live.get('po_relation') and \
+                fields.get(old_link, {}).get('type') not in LINKS:
+            done.append(f'po_link: {old_link} -> (removed)')
+            live.pop('po_link')
         rc = review_config.get(key)
         if isinstance(rc, dict) and variant_fields:
             try:

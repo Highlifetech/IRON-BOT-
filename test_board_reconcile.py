@@ -35,6 +35,14 @@ class ReconcileTests(unittest.TestCase):
         reconcile_configured_boards(Broken([], {}), {'base': BASE, 'table': CATALOG}, boards, {}, {})
         self.assertEqual(boards['x']['fields']['quantity'], 'Ordered Quantity (NetSuite)')
 
+    def test_removed_po_link_is_dropped(self):
+        schema = board_fields('tblOP', 'Other Production')
+        schemas = {'tblOP': schema, VARIANTS: variant_schema(('tblOP', 'Other Production'))}
+        boards = {'op': {'base': BASE, 'table': 'tblOP',
+                         'fields': {'identity': 'NetSuite product line ID', 'po_relation': 'Select PO', 'po_link': 'PO'}}}
+        reconcile_configured_boards(FakeClient([], schemas), {'base': BASE, 'table': CATALOG}, boards, {}, {})
+        self.assertNotIn('po_link', boards['op']['fields'])
+
 
 if __name__ == '__main__':
     unittest.main()
