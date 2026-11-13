@@ -75,7 +75,7 @@ def validate_observation(payload, boards, account):
             raise PushError('SOURCE_STATUS_REQUIRED')
     return lines
 
-def validate_group(lines, group):
+def validate_group(lines, group, whole_po=False):
     if not isinstance(group, dict) or not isinstance(group.get('product'), str) or not 1 <= len(group['product'].strip()) <= 200:
         raise PushError('INVALID_GROUP_PRODUCT')
     members = group.get('members')
@@ -90,7 +90,8 @@ def validate_group(lines, group):
     if any(not isinstance(s, str) or not 1 <= len(s.strip()) <= 100 for s in sizes) or len({s.strip().casefold() for s in sizes}) != len(sizes):
         raise PushError('VARIANT_SIZE_REQUIRED_AND_DISTINCT')
     first = lines[0]
-    if any(any(l.get(k) != first.get(k) for k in ('poId', 'destination', 'vendorId', 'soId', 'units')) for l in lines):
+    same = ('poId', 'destination', 'vendorId', 'soId') if whole_po else ('poId', 'destination', 'vendorId', 'soId', 'units')
+    if any(any(l.get(k) != first.get(k) for k in same) for l in lines):
         raise PushError('VARIANTS_MUST_SHARE_PO_BOARD_AND_UNIT')
     if not math.isfinite(sum(l['quantity'] for l in lines)): raise PushError('INVALID_GROUP_QUANTITY')
     return sorted(lines, key=lambda l: l['identity'])
@@ -352,8 +353,8 @@ class ReviewService:
             self.patch(old['board'],old['record_id'],{self.cfg(old['board'])['issue']:reason})
         return {'status':'Flagged for review'}
 
-    def group(self, lines, group, actor):
-        lines = validate_group(lines, group)
+    def group(self, lines, group, actor, whole_po=False):
+        lines = validate_group(lines, group, whole_po)
         if any(l.get('soShipTo')!=lines[0].get('soShipTo') for l in lines): raise PushError('GROUP_ADDRESS_MISMATCH')
         board = lines[0]['destination']; config = self.cfg(board)
         if not config.get('variants'): raise PushError('VARIANTS_NOT_CONFIGURED')
@@ -375,6 +376,9 @@ class ReviewService:
                 cur.execute('INSERT INTO om_ns_card_push(identity,board,fingerprint) VALUES(%s,%s,%s)', (key, board, group_hash))
         b, v = self.cards.boards[board], config['variants']
         combined = dict(lines[0], product=group['product'], description='\n'.join(l['description'] for l in lines), quantity=sum(l['quantity'] for l in lines))
+        if whole_po:
+            # One card for the whole PO: the title is the group name, each item is a row.
+            combined.update(productName=group['product'], variant='', sizes='')
         record = self.cards.create(board, combined); rid = record['record_id']
         self.patch(board,rid,self.metadata(board,lines[0],issue='Variant import in progress — totals not yet confirmed'))
         size = {m['identity']: m['size'] for m in group['members']}
@@ -397,7 +401,7 @@ class ReviewService:
                 self.store.save(cur, line['identity'], board, rid, line, vid, actor)
                 cur.execute('UPDATE om_ns_card_push SET record_id=%s,completed_at=now() WHERE identity=%s AND record_id IS NULL', (rid, line['identity']))
         from netsuite_card_push import so_address_status
-        return [{'identity': k, 'status': 'Created variant card', 'addressStatus':so_address_status(lines[0]), 'url': self.cards.url(board, rid)} for k in keys]
+        return [{'identity': k, 'status': 'Created PO card' if whole_po else 'Created variant card', 'addressStatus':so_address_status(lines[0]), 'url': self.cards.url(board, rid)} for k in keys]
 
 
 def register_routes(app, service, authorize):

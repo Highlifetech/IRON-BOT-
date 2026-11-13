@@ -155,6 +155,31 @@ def validate_payload(payload, boards, account):
     return lines
 
 
+def po_groups(lines):
+    """Lines grouped by PO and board, in the order they were sent."""
+    groups = {}
+    for line in lines:
+        groups.setdefault((line['poId'], line['destination']), []).append(line)
+    return list(groups.values())
+
+
+def po_group(members):
+    """Card title and one labelled row per item for a whole-PO card."""
+    first = members[0]
+    title = f"{first['poNumber']} · {first.get('customer') or first.get('vendor') or ''}".strip(' ·')
+    labels, seen = [], {}
+    for l in members:
+        name = (l.get('productName') or l.get('product') or 'Item').strip()
+        variant = (l.get('variant') or '').strip()
+        if variant and variant.lower() not in name.lower():
+            name = f'{name} – {variant}'
+        name = name[:90] or 'Item'
+        key = name.casefold()
+        seen[key] = seen.get(key, 0) + 1
+        labels.append(name if seen[key] == 1 else f'{name} ({seen[key]})')
+    return {'product': title[:200], 'members': [{'identity': l['identity'], 'size': lab} for l, lab in zip(members, labels)]}
+
+
 def starting_name_and_description(line):
     """Card starting values. The team edits them in Lark afterwards; never re-synced.
 
@@ -547,6 +572,11 @@ class LarkCards:
         """Starting Variants rows from the NetSuite Sizes column. Editable after.
         Never fails the card: a problem is reported in the result instead."""
         rows, bad = parse_sizes(line.get('sizes') or '')
+        # One size with no breakdown ("17.5\"", "OS", "Multi" excluded) is the whole line.
+        qty = line.get('quantity')
+        if not rows and len(bad) == 1 and bad[0].lower() not in ('multi', 'mixed', 'various', 'n/a', 'na', '-') \
+                and isinstance(qty, (int, float)) and not isinstance(qty, bool) and qty > 0 and float(qty).is_integer():
+            rows, bad = [(bad[0][:40], int(qty))], []
         if not rows:
             return 'Sizes not readable: ' + ', '.join(bad) if bad else ''
         v = (self.review_config.get(board) or {}).get('variants')
@@ -1012,6 +1042,29 @@ def register(app):
             reason = str(error) if isinstance(error, PushError) else 'INVALID_JSON_OR_TYPE'
             app.logger.warning('NetSuite card request rejected: %s', reason)
             return jsonify(error='REQUEST_NOT_AUTHORIZED_OR_INVALID'), 400
+        if payload.get('combine') == 'po' and not payload.get('group'):
+            # One card per PO (per board): each PO's lines become rows on a single card.
+            if not review: return jsonify(error='VARIANTS_NOT_CONFIGURED'),400
+            results = {}
+            singles = []
+            for members in po_groups(lines):
+                if len(members) < 2:
+                    singles.extend(members); continue
+                group = po_group(members)
+                try:
+                    for r in review.group(members, group, payload.get('actorId',''), whole_po=True):
+                        results[r['identity']] = r
+                except Exception as error:
+                    reason = str(error) if isinstance(error, PushError) else type(error).__name__
+                    app.logger.warning('NetSuite PO card requires review (%s): %s', members[0]['poId'], reason)
+                    for l in members:
+                        results[l['identity']] = {'identity': l['identity'], 'status': 'Needs review — one card per PO not made (' + reason + ')', 'url': None}
+            for line in singles:
+                try:
+                    results[line['identity']] = process(line, ledger, cards)
+                except Exception as error:
+                    results[line['identity']] = {'identity': line['identity'], 'status': friendly_reason(error), 'url': None}
+            return jsonify(results=[results[l['identity']] for l in lines])
         if payload.get('group'):
             if not review: return jsonify(error='VARIANTS_NOT_CONFIGURED'),400
             try:
